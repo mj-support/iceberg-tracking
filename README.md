@@ -4,7 +4,12 @@
 
 ### Installation
 
-...
+```bash
+git clone https://github.com/mj-support/iceberg-tracking.git
+cd iceberg-tracking
+conda env create -f environment.yml
+conda activate iceberg-tracking
+```
 
 ## Usage
 
