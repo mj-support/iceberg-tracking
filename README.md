@@ -15,10 +15,17 @@ conda activate iceberg-tracking
 
 ### Preparation
 
-Execute only once
+To get started, make sure your raw images are stored in the following directory structure: ```data/<dataset_name>/raw/```
 
-1. Labelling: labeling icebergs
-2. preprocessing.py: brightening, masking and tiling
+To preprocess the data (e.g., brighten, mask, or tile the images) execute the provided ```preprocessing.py``` script. 
+
+Additionally, you need a ```det.txt``` file containing iceberg detections for your dataset. This file can be generated manually (e.g., via labeling) or produced by a detection model.
+Each line in this file should follow this format: 
+
+```<image_without_extension>,<iceberg_id>,<bb_left>,<bb_top>,<bb_width>,<bb_height>,<conf>,<unused_1>,<unused_2>,<unused_3>```
+
+Example: ```_MG_17310_B,1,161.15,1087.59,247.32,90.46,0.9999,-1,-1,-1```
+
 
 ### Training
 

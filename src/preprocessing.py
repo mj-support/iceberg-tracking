@@ -57,11 +57,11 @@ class ImagePreprocessor:
             self.night_end = night_end
 
         # Set up input and output directories
-        self.input_dir = os.path.join(DATA_DIR, dataset, "raw")
+        self.input_dir = os.path.join(DATA_DIR, self.dataset, "images", "raw")
         if not os.path.exists(self.input_dir):
             raise FileNotFoundError(f"❗ Please store all raw and unprocessed images in: {self.input_dir}")
 
-        self.output_dir = os.path.join(DATA_DIR, dataset, "processed")
+        self.output_dir = os.path.join(DATA_DIR, self.dataset, "images", "processed")
         if not os.path.exists(self.output_dir):
             os.makedirs(self.output_dir)
 
@@ -91,12 +91,12 @@ class ImagePreprocessor:
         Displays a progress bar to show processing status.
         """
         # Get list of image files
-        image_files = os.listdir(self.input_dir)
+        image_files = [f for f in os.listdir(self.input_dir) if f.lower().endswith(('.jpg', '.jpeg', '.JPG', '.png', '.tiff'))]
 
         # Cache the green mask if masking is enabled (to avoid recomputing for each image)
         green_mask = self._extract_green_mask() if self.mask else None
         # Cache the tiles configuration if tiling is enabled
-        tiles = self._get_tiles_with_overlap() if self.tile else None
+        tiles = get_tiles_with_overlap(self.dataset) if self.tile else None
 
         # Create a progress bar using tqdm
         progress_bar = tqdm(
@@ -218,7 +218,7 @@ class ImagePreprocessor:
         Raises:
             FileNotFoundError: If mask.jpg is not found in the dataset directory
         """
-        image_path = os.path.join(DATA_DIR, self.dataset, "mask.jpg")
+        image_path = os.path.join(DATA_DIR, self.dataset, "images", "mask.jpg")
         if not os.path.exists(image_path):
             raise FileNotFoundError(f"❗ Please save the masking image as follows: {image_path}")
 
@@ -259,62 +259,6 @@ class ImagePreprocessor:
         masked_image = Image.fromarray(masked_image)
         return masked_image
 
-    def _get_tiles_with_overlap(self):
-        """
-        Define tile coordinates for different dataset types with overlap between tiles.
-
-        The overlap is calculated as a percentage (default 2.5%) of the tile dimensions
-        to ensure smooth transitions between tiles.
-
-        Returns:
-            dict: Dictionary of tile coordinates with keys for each tile region
-
-        Raises:
-            NotImplementedError: If the dataset is not recognized (currently must start with 'hill' or 'fjord')
-        """
-        overlap = 0.025  # 2.5% overlap between tiles
-        # self._tiling_helper()  # Uncomment to visualize tiling grid
-
-        # Define tile coordinates based on dataset type
-        if self.dataset.startswith("hill"):
-            # Hill dataset tile definitions
-            tiles = {
-                "A": {"xmin": 0, "xmax": 2000, "ymin": 1000, "ymax": 2300},
-                "B": {"xmin": 2000, "xmax": 4000, "ymin": 1000, "ymax": 2300},
-                "C": {"xmin": 4000, "xmax": 6000, "ymin": 1400, "ymax": 2900},
-                "D": {"xmin": 0, "xmax": 2000, "ymin": 2300, "ymax": 3600},
-                "E": {"xmin": 2000, "xmax": 4000, "ymin": 2300, "ymax": 3600},
-            }
-
-            # Adjust tile boundaries to create overlap
-            tiles["B"]["xmin"] = int(tiles["B"]["xmin"] * (1 - overlap))
-            tiles["C"]["xmin"] = int(tiles["C"]["xmin"] * (1 - overlap))
-            tiles["D"]["ymin"] = int(tiles["D"]["ymin"] * (1 - overlap))
-            tiles["E"]["ymin"] = int(tiles["E"]["ymin"] * (1 - overlap))
-            tiles["E"]["xmin"] = int(tiles["E"]["xmin"] * (1 - overlap))
-
-        elif self.dataset.startswith("fjord"):
-            # Fjord dataset tile definitions
-            tiles = {
-                "A": {"xmin": 0, "xmax": 1000, "ymin": 1000, "ymax": 2250},
-                "B": {"xmin": 1000, "xmax": 2000, "ymin": 500, "ymax": 2250},
-                "C": {"xmin": 2000, "xmax": 3000, "ymin": 500, "ymax": 2000},
-                "D": {"xmin": 3000, "xmax": 4000, "ymin": 500, "ymax": 1750},
-                "E": {"xmin": 4000, "xmax": 5750, "ymin": 750, "ymax": 1500},
-            }
-
-            # Adjust tile boundaries to create overlap
-            tiles["B"]["xmin"] = int(tiles["B"]["xmin"] * (1 - overlap))
-            tiles["C"]["xmin"] = int(tiles["C"]["xmin"] * (1 - overlap))
-            tiles["D"]["xmin"] = int(tiles["D"]["xmin"] * (1 - overlap))
-            tiles["E"]["xmin"] = int(tiles["E"]["xmin"] * (1 - overlap))
-
-        else:
-            raise NotImplementedError(f"❗ Please implement the tile sizes for this dataset: {self.dataset}\n"
-                                      f"If the dataset is from the fjord or hill, it should be name after it")
-
-        return tiles
-
     def _tile_and_save_images(self, image, image_name, tiles):
         """
         Extract tiles from an image based on predefined coordinates and save them.
@@ -350,7 +294,7 @@ class ImagePreprocessor:
         This is a development/debugging tool and not used in normal processing.
         """
         # Directory where your images are located
-        image_dir = os.path.join(DATA_DIR, self.dataset, "processed")
+        image_dir = os.path.join(DATA_DIR, self.dataset, "images", "processed")
         # List all the files in the directory
         image_files = [f for f in os.listdir(image_dir) if os.path.isfile(os.path.join(image_dir, f))]
         # Select a random image file from the list
@@ -380,6 +324,63 @@ class ImagePreprocessor:
             ax.axvline(x, color='blue', linestyle='--', linewidth=0.8)
 
         plt.show()
+
+
+def get_tiles_with_overlap(dataset):
+    """
+    Define tile coordinates for different dataset types with overlap between tiles.
+
+    The overlap is calculated as a percentage (default 2.5%) of the tile dimensions
+    to ensure smooth transitions between tiles.
+
+    Returns:
+        dict: Dictionary of tile coordinates with keys for each tile region
+
+    Raises:
+        NotImplementedError: If the dataset is not recognized (currently must start with 'hill' or 'fjord')
+    """
+    overlap = 0.025  # 2.5% overlap between tiles
+    # self._tiling_helper()  # Uncomment to visualize tiling grid
+
+    # Define tile coordinates based on dataset type
+    if dataset.startswith("hill"):
+        # Hill dataset tile definitions
+        tiles = {
+            "A": {"xmin": 0, "xmax": 2000, "ymin": 1000, "ymax": 2300},
+            "B": {"xmin": 2000, "xmax": 4000, "ymin": 1000, "ymax": 2300},
+            "C": {"xmin": 4000, "xmax": 6000, "ymin": 1400, "ymax": 2900},
+            "D": {"xmin": 0, "xmax": 2000, "ymin": 2300, "ymax": 3600},
+            "E": {"xmin": 2000, "xmax": 4000, "ymin": 2300, "ymax": 3600},
+        }
+
+        # Adjust tile boundaries to create overlap
+        tiles["B"]["xmin"] = int(tiles["B"]["xmin"] * (1 - overlap))
+        tiles["C"]["xmin"] = int(tiles["C"]["xmin"] * (1 - overlap))
+        tiles["D"]["ymin"] = int(tiles["D"]["ymin"] * (1 - overlap))
+        tiles["E"]["ymin"] = int(tiles["E"]["ymin"] * (1 - overlap))
+        tiles["E"]["xmin"] = int(tiles["E"]["xmin"] * (1 - overlap))
+
+    elif dataset.startswith("fjord"):
+        # Fjord dataset tile definitions
+        tiles = {
+            "A": {"xmin": 0, "xmax": 1000, "ymin": 1000, "ymax": 2250},
+            "B": {"xmin": 1000, "xmax": 2000, "ymin": 500, "ymax": 2250},
+            "C": {"xmin": 2000, "xmax": 3000, "ymin": 500, "ymax": 2000},
+            "D": {"xmin": 3000, "xmax": 4000, "ymin": 500, "ymax": 1750},
+            "E": {"xmin": 4000, "xmax": 5750, "ymin": 750, "ymax": 1500},
+        }
+
+        # Adjust tile boundaries to create overlap
+        tiles["B"]["xmin"] = int(tiles["B"]["xmin"] * (1 - overlap))
+        tiles["C"]["xmin"] = int(tiles["C"]["xmin"] * (1 - overlap))
+        tiles["D"]["xmin"] = int(tiles["D"]["xmin"] * (1 - overlap))
+        tiles["E"]["xmin"] = int(tiles["E"]["xmin"] * (1 - overlap))
+
+    else:
+        raise NotImplementedError(f"❗ Please implement the tile sizes for this dataset: {dataset}\n"
+                                  f"If the dataset is from the fjord or hill, it should be name after it")
+
+    return tiles
 
 
 def main():

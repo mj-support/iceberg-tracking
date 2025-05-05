@@ -1,14 +1,18 @@
 name: iceberg-tracking
 channels:
+  - pytorch
   - conda-forge
   - defaults
 dependencies:
   - python=3.13.3
   - pip
+  - pytorch
+  - torchvision
   - pip:
       - pillow
       - opencv-python
       - scikit-image
       - matplotlib
       - tdqm
+      - scikit-learn
       - -e .
