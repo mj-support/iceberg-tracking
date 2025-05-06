@@ -284,24 +284,16 @@ class IcebergDetector:
                 epoch_end_time = time.time()
                 epoch_duration = epoch_end_time - epoch_start_time
                 epoch_times.append(epoch_duration)
+                current_total_time, estimated_total_remaining, avg_time_per_epoch = (
+                    self._calculate_training_progress(total_start_time, k_folds, fold, num_epochs, epoch)
+                )
 
-                # Calculate running average of epoch duration for more stable estimates
-                avg_epoch_time = sum(epoch_times) / len(epoch_times)
-
-                # Estimate remaining time, accounting for potential early stopping
-                epochs_remaining = num_epochs - (epoch + 1)
-                if epochs_no_improve >= patience - 1:  # If about to trigger early stopping
-                    epochs_remaining = 0
-
-                # Calculate estimated time remaining and format as readable string
-                estimated_remaining = epochs_remaining * avg_epoch_time
-                estimated_remaining_str = str(timedelta(seconds=int(estimated_remaining)))
-
-                # Print current epoch stats and time estimates
+                # Print current epoch stats and global time estimates
                 print(f"Epoch [{epoch + 1}/{num_epochs}] "
                       f"Train Loss: {train_loss:.4f} Val Loss: {val_loss:.4f} | "
-                      f"Time: {timedelta(seconds=int(epoch_duration))} | "
-                      f"Est. remaining: {estimated_remaining_str}")
+                      f"Time: {timedelta(seconds=int(current_total_time))}<"
+                      f"{timedelta(seconds=int(estimated_total_remaining))}, "
+                      f"{timedelta(seconds=int(avg_time_per_epoch))}/Epoch")
 
                 # Check for improvement in validation loss
                 if val_loss < best_val_loss:
@@ -554,6 +546,55 @@ class IcebergDetector:
 
         # Return average loss over all batches
         return running_loss / len(data_loader)
+
+    def _calculate_training_progress(self, total_start_time, k_folds, fold, num_epochs, epoch):
+        """
+        Calculate global training progress and time estimation metrics across all folds.
+
+        This method computes the current runtime, estimates the remaining time, and
+        calculates the average epoch execution time based on the overall training progress.
+        These metrics provide a global perspective on training status rather than fold-specific
+        information.
+
+        Args:
+            total_start_time (float): Unix timestamp when the entire training process started
+            k_folds (int): Total number of folds in cross-validation
+            fold (int): Current fold index (0-based)
+            num_epochs (int): Maximum number of epochs per fold
+            epoch (int): Current epoch index within the current fold (0-based)
+
+        Returns:
+            tuple: A tuple containing:
+                - current_total_time (float): Elapsed time since training started (in seconds)
+                - estimated_total_remaining (float): Estimated time to complete all remaining epochs (in seconds)
+                - avg_time_per_epoch (float): Average time per epoch across all completed epochs (in seconds)
+        """
+        # Calculate elapsed time since the start of the entire training process
+        current_total_time = time.time() - total_start_time
+
+        # Calculate the total number of epochs across all folds
+        total_epochs = k_folds * num_epochs
+
+        # Calculate the global epoch number (1-based) across all folds
+        # This represents which epoch we're on if we consider all folds sequentially
+        current_epoch_global = fold * num_epochs + (epoch + 1)
+
+        # Number of epochs we've completed so far across all folds
+        epochs_completed = current_epoch_global
+
+        # Calculate the average time taken per epoch based on all epochs completed so far
+        # This provides a more stable estimate as training progresses
+        avg_time_per_epoch = current_total_time / epochs_completed
+
+        # Calculate how many epochs remain across all folds
+        remaining_epochs = total_epochs - epochs_completed
+
+        # Estimate the total time remaining for the entire training process
+        # based on average time per epoch and number of remaining epochs
+        estimated_total_remaining = remaining_epochs * avg_time_per_epoch
+
+        return current_total_time, estimated_total_remaining, avg_time_per_epoch
+
 
     def _evaluate(self, model, data_loader):
         """
