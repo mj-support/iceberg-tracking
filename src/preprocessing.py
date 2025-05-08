@@ -23,12 +23,13 @@ class ImagePreprocessor:
     All operations are optional and can be enabled/disabled at initialization.
     """
 
-    def __init__(self, dataset, brighten=False, mask=False, tile=False, night_start=None, night_end=None):
+    def __init__(self, dataset, image_format, brighten=False, mask=False, tile=False, night_start=None, night_end=None):
         """
         Initialize the image preprocessor with specified operations as parameters.
 
         Args:
             dataset (str): Name of the dataset stored in data/
+            image_format (str): File formats of the images (file extension)
             brighten (bool): Whether to apply brightness enhancement
             mask (bool): Whether to apply masking
             tile (bool): Whether to split images into tiles
@@ -41,6 +42,7 @@ class ImagePreprocessor:
             FileNotFoundError: If the input directory does not exist
         """
         self.dataset = dataset
+        self.image_format = f".{image_format}".lower()
         self.brighten = brighten
         self.mask = mask
         self.tile = tile
@@ -91,7 +93,7 @@ class ImagePreprocessor:
         Displays a progress bar to show processing status.
         """
         # Get list of image files
-        image_files = [f for f in os.listdir(self.input_dir) if f.lower().endswith(('.jpg', '.jpeg', '.JPG', '.png', '.tiff'))]
+        image_files = [f for f in os.listdir(self.input_dir) if f.lower().endswith(self.image_format)]
 
         # Cache the green mask if masking is enabled (to avoid recomputing for each image)
         green_mask = self._extract_green_mask() if self.mask else None
@@ -271,7 +273,7 @@ class ImagePreprocessor:
         for tile_entry in tiles:
             tile = tiles[tile_entry]
             # Create output filename with tile identifier
-            output_img_path = os.path.join(self.output_dir, image_name[:-4] + '_' + tile_entry + '.JPG')
+            output_img_path = os.path.join(self.output_dir, image_name[:-4] + '_' + tile_entry + self.image_format)
 
             # Convert PIL image to numpy array for slicing
             image_array = np.array(image)
@@ -389,6 +391,7 @@ def main():
     # Creates an ImagePreprocessor instance with the specified dataset and preprocessing options
     preprocessor = ImagePreprocessor(
         dataset=dataset,
+        image_format="JPG",
         brighten=True,
         mask=True,
         tile=True,
