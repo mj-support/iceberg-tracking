@@ -27,15 +27,15 @@ Each line in this file should follow this format:
 Example: ```_MG_17310_B,1,161.15,1087.59,247.32,90.46,0.9999,-1,-1,-1```
 
 
-### Training
+### Execution
 
 Execute each training run
 
-1. get_coco_annotations.py: transform annotations to COCO format
-2. model_train.py: Faster R-CNN model with a ResNet50-FPN backbone to detect icebergs
-3. model_inference.py: Inference to get all detections
-4. tracking.py: calculate distance and overlapping, match detections, filter outliers and nested icebergs, visualize results
+1. preprocessing.py: transform annotations to COCO format
+2. detection.py: Faster R-CNN model with a ResNet50-FPN backbone to train and predict detection of icebergs
+3. tracking.py: track icebergs based on detection data and various tracking parameters like size, distance and overlapping
 
+Additionally you can display the results via visualization.py
 
 ## Glacier
 - name: Equalorutsit Kangiliit Sermiat OR Qajuuttap Sermia 
