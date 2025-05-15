@@ -1,6 +1,7 @@
 import os
 import copy
 import cv2
+import multiprocessing as mp
 import torch
 import time
 import numpy as np
@@ -8,7 +9,9 @@ import pandas as pd
 from datetime import timedelta
 from PIL import Image
 from sklearn.model_selection import KFold
+from tqdm import tqdm
 import torchvision.transforms.functional as F
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from torchvision.models.detection import fasterrcnn_resnet50_fpn
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 from torch.utils.data import Dataset, DataLoader, Subset
@@ -33,7 +36,7 @@ class IcebergDataset(Dataset):
             transforms (callable, optional): Image transformations to apply to each image
         """
         self.img_folder = image_dir
-        self.image_format = f".{image_format}".lower()
+        self.image_format = image_format
         self.transforms = transforms
         self.detections = None
         self.unique_images = []
@@ -167,7 +170,7 @@ class IcebergDetector:
                                where 0 is background and 1 is iceberg)
         """
         self.dataset = dataset
-        self.image_format = f".{image_format}".lower()
+        self.image_format = f".{image_format}"
         self.num_classes = num_classes
         self.tile = tile
         # Automatically use GPU if available, else CPU
@@ -347,7 +350,6 @@ class IcebergDetector:
             FileNotFoundError: If no trained model is found, this method suggests
                               training a model first.
         """
-
         print(f"\nStarting prediction with {confidence_threshold} confidence threshold")
         try:
             # Attempt to load the trained model
@@ -364,6 +366,7 @@ class IcebergDetector:
         # Create a dataset for inference (no annotations needed)
         transformed_dataset = IcebergDataset(
             image_dir=self.images_dir,
+            image_format=self.image_format,
             transforms=self._get_transform()
         )
 
@@ -373,20 +376,25 @@ class IcebergDetector:
             num_workers=4, collate_fn=lambda x: tuple(zip(*x))
         )
 
-        # Start timing the entire inference process
-        start_time = time.time()
-        total_images = len(dataloader)
-
-        # Track the last percentage reported to avoid duplicate reports
-        last_reported_percentage = -5  # Start at -5 to ensure 0% is reported
+        # Create progress bar for tracking
+        progress_bar = tqdm(
+            enumerate(dataloader),
+            desc="Predict icebergs",
+            total=len(dataloader),
+            unit="image",
+            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
+        )
 
         # Prepare detection output file in the required format
         with open(self.detections_file, 'w') as det_file:
-            for i, (images, targets) in enumerate(dataloader):
+            for i, (images, targets) in progress_bar:
                 # Get the single image and target from batch
                 image = images[0].to(self.device)
                 target = targets[0]
                 img_name = target["file_name"]
+
+                # Update progress bar description with current file
+                progress_bar.set_description(f"Processing {img_name}")
 
                 # Perform inference without gradient calculation
                 with torch.no_grad():
@@ -395,7 +403,6 @@ class IcebergDetector:
                 # Extract predictions
                 boxes = prediction[0]['boxes'].cpu().numpy()
                 scores = prediction[0]['scores'].cpu().numpy()
-                labels = prediction[0]['labels'].cpu().numpy()
 
                 # Frame ID is the image name without leading zeros (per format requirements)
                 frame_id = img_name.lstrip('0')
@@ -418,15 +425,7 @@ class IcebergDetector:
                         )
                         object_id += 1  # Increment object ID for next detection
 
-                # Calculate current progress percentage
-                last_reported_percentage = self._calculate_prediction_progress(
-                    total_images, start_time,last_reported_percentage, i)
-
-        # Calculate and print final statistics
-        total_duration = time.time() - start_time
-        print(f"\nInference complete: {total_images} images in {timedelta(seconds=int(total_duration))}")
         print(f"Detections saved to {self.detections_file}")
-
         print(f"\nStarting postprocessing {self.detections_file}")
         self.postprocess()
 
@@ -616,37 +615,6 @@ class IcebergDetector:
 
         return current_total_time, estimated_total_remaining, avg_time_per_epoch
 
-    def _calculate_prediction_progress(self, total_images, start_time, last_reported_percentage, i):
-        # Calculate current progress percentage
-        current_percentage = int((i + 1) / total_images * 100)
-
-        # Check if we've reached a new 5% interval
-        if current_percentage >= last_reported_percentage + 5:
-            # Calculate timing metrics
-            current_total_time = time.time() - start_time
-            images_completed = i + 1
-
-            # Calculate average time per image
-            avg_time_per_image = current_total_time / images_completed
-
-            # Estimate remaining time
-            remaining_images = total_images - images_completed
-            estimated_total_remaining = remaining_images * avg_time_per_image
-
-            # Calculate images per second (throughput)
-            images_per_second = images_completed / current_total_time
-
-            # Print progress with timing information
-            print(f"Progress: {current_percentage}% ({images_completed}/{total_images} images) | "
-                  f"Time: {timedelta(seconds=int(current_total_time))}<"
-                  f"{timedelta(seconds=int(estimated_total_remaining))}, "
-                  f"{images_per_second:.2f} images/sec")
-
-            # Update the last reported percentage
-            last_reported_percentage = current_percentage
-
-        return last_reported_percentage
-
     def _evaluate(self, model, data_loader):
         """
         Evaluate model performance on validation or test data.
@@ -694,89 +662,76 @@ class IcebergDetector:
         """
         Remove detections that are primarily in masked (black) areas of the images.
 
-        This method reads detection entries from a detection file, checks each bounding box
-        against the corresponding image to determine if it primarily contains black pixels
-        (mask area), and writes a new detection file without the masked detections.
+        This method uses parallel processing to efficiently handle large numbers of detections.
+        It checks each bounding box against the corresponding image to determine if it primarily
+        contains black pixels (mask area), and writes a new detection file without the masked detections.
 
         Note:
             This method creates a temporary file and then replaces the original detection file.
         """
+        import multiprocessing as mp
+        from tqdm import tqdm
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+
         black_threshold = 0.8
         print(f"Removing detections in masked areas (black threshold: {black_threshold})")
 
         # Create a temporary file for filtered detections
         temp_file = self.detections_file + ".temp"
 
-        # Track statistics
-        total_detections = 0
-        masked_detections = 0
-
         try:
-            # Open original detection file and create temporary file
-            with open(self.detections_file, 'r') as in_file, open(temp_file, 'w') as out_file:
+            # First read all detections and prepare data
+            all_detections = []
+            with open(self.detections_file, 'r') as in_file:
                 for line in in_file:
-                    print(total_detections)
-                    total_detections += 1
-
-                    # Parse detection line
                     parts = line.strip().split(',')
                     if len(parts) < 7:  # Ensure we have at least the essential fields
-                        # If line format is unexpected, keep it and continue
-                        out_file.write(line)
+                        all_detections.append(
+                            (line, None, None, None, None, None, self.images_dir, self.image_format, black_threshold))
                         continue
 
                     # Extract bounding box information
                     frame_id = parts[0]
                     x, y = float(parts[2]), float(parts[3])
                     width, height = float(parts[4]), float(parts[5])
+                    all_detections.append(
+                        (line, frame_id, x, y, width, height, self.images_dir, self.image_format, black_threshold))
 
-                    # Construct image path - adjust as needed based on your naming convention
-                    # This assumes frame_id is part of the image filename
-                    img_name = str(frame_id).zfill(6) + self.image_format  # Adjust padding as needed
-                    img_file = os.path.join(self.images_dir, img_name)
+            total_detections = len(all_detections)
+            print(f"Loaded {total_detections} detections for processing")
 
-                    # Check if image exists
-                    if not os.path.exists(img_file):
-                        # If image doesn't exist, keep the detection and continue
-                        out_file.write(line)
-                        continue
+            # Process detections in parallel
+            num_workers = min(mp.cpu_count(), 16)  # Use up to 16 workers or max CPU cores
+            results = []
+            masked_detections = 0
 
-                    # Load image (using OpenCV for efficient image processing)
-                    img = cv2.imread(img_file)
-                    if img is None:
-                        # If image can't be loaded, keep the detection and continue
-                        out_file.write(line)
-                        continue
+            print(f"Processing with {num_workers} parallel workers")
 
-                    # Ensure coordinates are within image bounds
-                    img_height, img_width = img.shape[:2]
-                    x1 = max(0, int(x))
-                    y1 = max(0, int(y))
-                    x2 = min(img_width, int(x + width))
-                    y2 = min(img_height, int(y + height))
+            # Create progress bar for tracking
+            with ProcessPoolExecutor(max_workers=num_workers) as executor:
+                # Submit all detection processing tasks
+                futures = [executor.submit(_process_masked_detection, detection_data)
+                           for detection_data in all_detections]
 
-                    # Skip invalid bounding boxes
-                    if x1 >= x2 or y1 >= y2:
-                        out_file.write(line)
-                        continue
+                # Track progress with tqdm
+                with tqdm(
+                        total=total_detections,
+                        desc="Processing detections",
+                        unit="detection",
+                        bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
+                ) as progress_bar:
+                    for future in as_completed(futures):
+                        progress_bar.update(1)
+                        line, is_masked = future.result()
+                        if is_masked:
+                            masked_detections += 1
+                        else:
+                            results.append(line)
 
-                    # Extract bounding box region
-                    bbox_region = img[y1:y2, x1:x2]
-
-                    # Count black pixels ([0,0,0]) in the bounding box
-                    # A pixel is considered black if all channels are below a small threshold (e.g., 10)
-                    black_pixel_threshold = 10  # Tolerance for nearly black pixels
-                    black_pixels = np.sum(np.all(bbox_region < black_pixel_threshold, axis=2))
-                    total_pixels = bbox_region.shape[0] * bbox_region.shape[1]
-
-                    # Calculate ratio of black pixels
-                    black_ratio = black_pixels / total_pixels if total_pixels > 0 else 0
-
-                    # If black ratio is below threshold, keep the detection
-                    if black_ratio < black_threshold:
-                        out_file.write(line)
-                    else:
-                        masked_detections += 1
+            # Write filtered results to file
+            with open(temp_file, 'w') as out_file:
+                for line in results:
+                    out_file.write(line)
 
             # Replace original file with filtered file
             os.replace(temp_file, self.detections_file)
@@ -897,6 +852,67 @@ class IcebergDetector:
 
         with open(det_file, "w") as f:
             f.writelines(sorted_lines)
+
+
+def _process_masked_detection(args):
+    """
+    Process a single detection to determine if it's in a masked area.
+
+    Args:
+        args: Tuple containing:
+            - line: Original detection line
+            - frame_id: ID of the frame
+            - x, y, width, height: Bounding box coordinates
+            - images_dir: Directory containing images
+            - image_format: Format of image files (e.g., '.jpg')
+            - black_threshold: Threshold for determining masked detections
+
+    Returns:
+        Tuple: (line, is_masked)
+    """
+    line, frame_id, x, y, width, height, images_dir, image_format, black_threshold = args
+
+    # Handle cases where we don't have valid detection data
+    if frame_id is None:
+        return line, False
+
+    # Construct image path
+    img_name = str(frame_id).zfill(6) + image_format
+    img_file = os.path.join(images_dir, img_name)
+
+    # Check if image exists
+    if not os.path.exists(img_file):
+        return line, False
+
+    # Load image (using OpenCV for efficient image processing)
+    img = cv2.imread(img_file)
+    if img is None:
+        return line, False
+
+    # Ensure coordinates are within image bounds
+    img_height, img_width = img.shape[:2]
+    x1 = max(0, int(x))
+    y1 = max(0, int(y))
+    x2 = min(img_width, int(x + width))
+    y2 = min(img_height, int(y + height))
+
+    # Skip invalid bounding boxes
+    if x1 >= x2 or y1 >= y2:
+        return line, False
+
+    # Extract bounding box region
+    bbox_region = img[y1:y2, x1:x2]
+
+    # Count black pixels ([0,0,0]) in the bounding box
+    black_pixel_threshold = 10  # Tolerance for nearly black pixels
+    black_pixels = np.sum(np.all(bbox_region < black_pixel_threshold, axis=2))
+    total_pixels = bbox_region.shape[0] * bbox_region.shape[1]
+
+    # Calculate ratio of black pixels
+    black_ratio = black_pixels / total_pixels if total_pixels > 0 else 0
+
+    # If black ratio is above threshold, mark for removal
+    return line, black_ratio >= black_threshold
 
 
 def main():

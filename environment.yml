@@ -15,5 +15,7 @@ dependencies:
   - tqdm
   - scikit-learn
   - pandas
+  - jupyter
+  - ipykernel
   - pip:
       - -e .

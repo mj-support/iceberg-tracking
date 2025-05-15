@@ -634,7 +634,7 @@ def main():
         nested_threshold=0.8,
     )
 
-    visualize(dataset, tracker.tracking_file, save_images=False, start_index=200)
+    visualize(dataset, tracker.tracking_file, start_index=200, length=10, save_images=False)
 
 
 

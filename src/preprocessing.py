@@ -42,7 +42,7 @@ class ImagePreprocessor:
             FileNotFoundError: If the input directory does not exist
         """
         self.dataset = dataset
-        self.image_format = f".{image_format}".lower()
+        self.image_format = f".{image_format}"
         self.brighten = brighten
         self.mask = mask
         self.tile = tile
@@ -93,7 +93,7 @@ class ImagePreprocessor:
         Displays a progress bar to show processing status.
         """
         # Get list of image files
-        image_files = [f for f in os.listdir(self.input_dir) if f.lower().endswith(self.image_format)]
+        image_files = [f for f in os.listdir(self.input_dir) if f.endswith(self.image_format)]
 
         # Cache the green mask if masking is enabled (to avoid recomputing for each image)
         green_mask = self._extract_green_mask() if self.mask else None
@@ -401,6 +401,11 @@ def main():
 
     # Run the preprocessing pipeline
     preprocessor.process_images()
+
+    from utils.visualize import visualize
+    visualize(dataset, None, start_index=200, length=10, save_images=False)
+
+
 
 
 if __name__ == "__main__":
