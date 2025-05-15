@@ -31,9 +31,8 @@ Example: ```_MG_17310_B,1,161.15,1087.59,247.32,90.46,0.9999,-1,-1,-1```
 
 Execute each training run
 
-1. preprocessing.py: transform annotations to COCO format
-2. detection.py: Faster R-CNN model with a ResNet50-FPN backbone to train and predict detection of icebergs
-3. tracking.py: track icebergs based on detection data and various tracking parameters like size, distance and overlapping
+1. detection.py: Faster R-CNN model with a ResNet50-FPN backbone to train and predict detection of icebergs
+2. tracking.py: track icebergs based on detection data and various tracking parameters like size, distance and overlapping
 
 Additionally you can display the results via visualization.py
 
