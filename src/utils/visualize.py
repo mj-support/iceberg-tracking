@@ -1,172 +1,265 @@
 import os
 import cv2
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from utils.paths import DATA_DIR
-from ipywidgets import interact, IntSlider, VBox, HTML
-import ipywidgets as widgets
-from IPython.display import display
+from IPython.display import HTML
+import base64
+import matplotlib.pyplot as plt
 
-def visualize(dataset, file, image_format="jpg", start_index=0, length=1000, jupyterNB=True, save_images=False):
+
+class Visualizer:
     """
-    Visualize the results with a styled slider below a centered image for Jupyter Notebooks.
+    A class for visualizing iceberg detection and tracking results.
 
-    Args:
-        dataset (str): Name of the dataset directory
-        file (str): The path to the txt-file containing data of the images and icebergs.
-        image_format (str): File formats of the images (file extension without the dot)
-        start_index: The index of the first image to process. Default is 0 (process from the beginning).
-        length (int): Number of images to visualize. Default is 1000.
-        jupyterNB (bool): True if visualizing takes place in jupyter notebooks. Default is True.
-        save_images (bool): Whether or not to save the images with bounding boxes drawn.
+    This class provides functionality to visualize different stages of an iceberg detection
+    and tracking pipeline. It can display raw images, preprocessed images, detection results,
+    or tracking results. The visualization can be displayed as individual plots or compiled
+    into a video.
+
+    Attributes:
+        dataset (str): Name of the dataset to visualize
+        image_format (str): Format of the image files (jpg, png, etc.)
+        stage (str): Processing stage to visualize (preprocessing, detection, tracking)
+        start_index (int): Starting index for image selection
+        length (int): Number of images to process
+        image_dir (str): Directory containing the images
+        images (list): List of image filenames to process
     """
-    if file is None:
-        image_dir = os.path.join(DATA_DIR, dataset, "images", "processed")
-    else:
-        image_dir = os.path.join(DATA_DIR, dataset, "images", "raw")
-    image_format = f".{image_format}".lower()
-    colormap = {}  # Store colors for each object ID
 
-    # Load the tracking data
-    if file is not None:
-        det_data = pd.read_csv(file, header=None)
-        det_data.columns = ['frame', 'ID', 'bbox_left', 'bbox_top', 'bbox_width', 'bbox_height', 'confidence', 'x', 'y', 'z']
-    else:
-        det_data = pd.DataFrame()
+    def __init__(self, dataset, image_format="jpg", stage="tracking", start_index=0, length=10):
+        """
+        Initialize the Visualizer with dataset and visualization parameters.
 
-    # Get sorted list of image paths
-    sorted_images = sorted([
-        f for f in os.listdir(image_dir)
-        if f.lower().endswith(image_format)
-    ])
+        Args:
+            dataset (str): Name of the dataset to visualize
+            image_format (str): Format of image files without dot (e.g., 'jpg', 'png')
+            stage (str): Processing stage to visualize. Options:
+                         - 'preprocessing': Visualize preprocessed images
+                         - 'detection': Visualize detection results
+                         - 'tracking': Visualize tracking results
+            start_index (int): Starting index for image selection
+            length (int): Number of images to process
 
-    # Trim to the desired range
-    sorted_images = sorted_images[start_index:start_index + length]
+        Raises:
+            ValueError: If an invalid stage is provided
+        """
+        # Validate the stage parameter
+        valid_stages = {"preprocessing", "detection", "tracking"}
+        if stage not in valid_stages:
+            raise ValueError(f"Invalid stage '{stage}'. Must be one of {valid_stages}")
 
-    if jupyterNB == True:
-        # Define a more styled slider
-        styled_slider = IntSlider(
-            min=0,
-            max=len(sorted_images) - 1,
-            step=1,
-            value=0,
-            description='Image Index:',
-            style={'description_width': 'initial'},
-            layout=widgets.Layout(width='95%') # Make it wider
-        )
+        # Store initialization parameters
+        self.dataset = dataset
+        self.image_format = f".{image_format}".lower()
+        self.stage = stage
+        self.start_index = start_index
+        self.length = length
 
-        # Add some custom CSS for a more modern look
-        display(HTML("""
-            <style>
-                .widget-label { font-weight: bold !important; }
-                .widget-slider { -webkit-appearance: none; height: 15px; border-radius: 5px; background: #d3d3d3; outline: none; -webkit-transition: .2s; transition: opacity .2s; }
-                .widget-slider::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 20px; height: 20px; border-radius: 50%; background: #4CAF50; cursor: pointer; }
-                .widget-slider::-moz-range-thumb { width: 20px; height: 20px; border-radius: 50%; background: #4CAF50; cursor: pointer; }
-                .output_subarea { text-align: center !important; } /* Center the image output */
-            </style>
-        """))
+        # Set up the appropriate image directory based on the stage
+        self.image_dir = os.path.join(DATA_DIR, dataset, "images", "raw")
+        if stage == "preprocessing":
+            self.image_dir = os.path.join(DATA_DIR, dataset, "images", "processed")
+        elif stage == "detection":
+            # For detection stage, we need the detection results file
+            self.txt_file = os.path.join(DATA_DIR, dataset, "detections", "det.txt")
+        elif stage == "tracking":
+            # For tracking stage, we need the tracking results file
+            self.txt_file = os.path.join(DATA_DIR, dataset, "results", "mot.txt")
 
-        def show_image(index):
-            img_name = sorted_images[index]
-            image_path = os.path.join(image_dir, img_name)
+        # Get a sorted list of image files with the specified format
+        self.images = sorted([
+            f for f in os.listdir(self.image_dir)
+            if f.lower().endswith(self.image_format)
+        ])
+
+        # Trim the image list to the desired range
+        self.images = self.images[start_index:start_index + length]
+
+    def render_video(self, fps=1, resolution=None):
+        """
+        Render a video from the visualization results.
+
+        Creates a video file from the selected images with bounding boxes and object IDs
+        when applicable (detection and tracking stages). The video is saved to the dataset's
+        video directory.
+
+        Args:
+            fps (int): Frames per second for the output video
+            resolution (tuple, optional): Desired resolution as (width, height).
+                                         If None, uses the original image resolution.
+
+        Returns:
+            HTML: HTML object for displaying the video in Jupyter notebooks
+        """
+        # Create video directory if it doesn't exist
+        video_dir = os.path.join(DATA_DIR, self.dataset, "videos/")
+        os.makedirs(os.path.dirname(video_dir), exist_ok=True)
+        video_path = os.path.join(video_dir, f"{self.stage}.mp4")
+
+        # Set video dimensions based on resolution parameter or first image
+        if resolution:
+            width, height = resolution
+        else:
+            first_image = cv2.imread(str(os.path.join(self.image_dir, self.images[0])))
+            height, width, _ = first_image.shape
+
+        # Initialize the video writer with MP4 codec
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # Use 'mp4v' for MP4 output
+        video_writer = cv2.VideoWriter(video_path, fourcc, fps, (width, height))
+
+        images = []
+        if self.stage == "preprocessing":
+            for i, img_name in enumerate(self.images):
+                # Read the image from disk
+                image_path = os.path.join(self.image_dir, img_name)
+                img = cv2.imread(image_path)
+                images.append(img)
+        else:
+            # Get images with bounding boxes and object IDs mapped
+            images = self.map_icebergs()
+
+        # Process each image and write to video
+        for img in images:
+            if resolution:
+                img = cv2.resize(img, (width, height))
+
+            # Write the processed image to video
+            video_writer.write(img)
+
+        # Release resources and display the video
+        video_writer.release()
+        print(f"Video saved to {video_path}")
+        return self.display_video(video_path)
+
+    def map_icebergs(self):
+        """
+        Map icebergs by drawing bounding boxes and IDs on images.
+
+        Reads detection or tracking data from the corresponding text file and
+        draws bounding boxes around detected/tracked objects. Each object ID gets
+        a consistent color for easier tracking visualization.
+
+        Returns:
+            list: List of images with bounding boxes and object IDs drawn on them
+        """
+        colormap = {}  # Dictionary to store colors for each object ID
+        # Read detection/tracking data
+        det_data = pd.read_csv(self.txt_file, header=None)
+        # Assign column names based on expected format
+        det_data.columns = ['frame', 'ID', 'bbox_left', 'bbox_top', 'bbox_width', 'bbox_height', 'confidence', 'x', 'y',
+                            'z']
+
+        images_with_mappings = []
+
+        # Process each image in the selected range
+        for i, img_name in enumerate(self.images):
+            # Read the image from disk
+            image_path = os.path.join(self.image_dir, img_name)
             img = cv2.imread(image_path)
-            image_no = img_name[:-4]
 
-            if file is not None:
-                frame_data = det_data[det_data['frame'] == image_no]
-            else:
-                frame_data = pd.DataFrame()
+            # Extract frame ID from image name (removing file extension)
+            image_no = img_name[:-4]  # Get the frame ID from image name
 
-            # Draw bounding boxes
+            if img is None:
+                print(f"Image {image_path} not found.")
+                continue
+
+            # Filter detection/tracking data for the current frame
+            frame_data = det_data[det_data['frame'] == image_no]
+
+            # Draw bounding boxes and labels for each object in the frame
             for _, row in frame_data.iterrows():
                 object_id = int(row['ID'])
+
+                # Assign a consistent color to each object ID
                 if object_id not in colormap:
-                    np.random.seed(object_id)
+                    np.random.seed(object_id)  # Ensure consistent color assignment
                     color = tuple(map(int, np.random.randint(0, 255, size=3)))
                     colormap[object_id] = color
                 color = colormap[object_id]
+
+                # Extract bounding box coordinates from the data
                 bbox_left, bbox_top = int(row['bbox_left']), int(row['bbox_top'])
                 bbox_width, bbox_height = int(row['bbox_width']), int(row['bbox_height'])
+
+                # Draw the bounding box and object ID label on the image
                 cv2.rectangle(img, (bbox_left, bbox_top), (bbox_left + bbox_width, bbox_top + bbox_height), color, 2)
                 cv2.putText(img, str(object_id), (bbox_left, bbox_top - 5), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
 
-            # Show image
-            fig, ax = plt.subplots(figsize=(10, 6))
-            ax.imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-            ax.set_title(img_name)
-            ax.axis('off')
-            plt.close(fig)  # Prevent duplicate display
+            # Add the processed image to the result list
+            images_with_mappings.append(img)
 
-            return fig
+        return images_with_mappings
 
-        def display_image(index):
-            fig = show_image(index)
-            display(HTML(f"<div style='text-align: center;'>{fig_to_html(fig)}</div>"))
+    def display_video(self, video_path, width=640, height=480):
+        """
+        Display a video inside a Jupyter Notebook.
 
-        def fig_to_html(fig):
-            import io
-            buf = io.BytesIO()
-            fig.savefig(buf, format='png', bbox_inches='tight')
-            buf.seek(0)
-            img_html = f'<img src="data:image/png;base64,{base64.b64encode(buf.getvalue()).decode()}"/>'
-            return img_html
+        Encodes the video as base64 and creates an HTML video element to display it.
 
-        import base64
-        ui = VBox([HTML("<div style='text-align: center;'></div>"), styled_slider])
-        out = widgets.interactive_output(display_image, {'index': styled_slider})
-        display(ui, out)
+        Args:
+            video_path (str): Path to the video file
+            width (int): Display width of the video
+            height (int): Display height of the video
 
-    else:
-        for i, img_name in enumerate(sorted_images):
-            if i < start_index:
-                continue  # Skip images before the start index
-            if i - start_index > length:
-                break
+        Returns:
+            HTML: HTML object containing the video for Jupyter notebook display
+        """
+        # Read the video file and encode it as base64
+        video = open(video_path, "rb").read()
+        encoded = base64.b64encode(video).decode("ascii")
 
-            if img_name.lower().endswith(image_format):
-                image_path = f"{image_dir}/{img_name}"
+        # Create HTML with centered video element
+        return HTML(f"""
+        <div style="text-align: center;">
+            <video width="{width}" height="{height}" controls>
+                <source src="data:video/mp4;base64,{encoded}" type="video/mp4">
+            </video>
+        </div>
+        """)
+
+    def pyplot(self):
+        """
+        Display all processed images individually using matplotlib.
+
+        This method shows each image with its bounding boxes and object IDs
+        in a separate figure using matplotlib. Useful for detailed inspection
+        of individual frames.
+        """
+
+        images = []
+        if self.stage == "preprocessing":
+            for i, img_name in enumerate(self.images):
+                # Read the image from disk
+                image_path = os.path.join(self.image_dir, img_name)
                 img = cv2.imread(image_path)
-                image_no = img_name[:-4]  # Get the frame ID from image name
+                images.append(img)
+        else:
+            # Get images with bounding boxes and object IDs mapped
+            images= self.map_icebergs()
 
-                if img is None:
-                    print(f"Image {image_path} not found.")
-                    return
+        # Display each image in a separate matplotlib figure
+        for index, img in enumerate(images):
+            # Create a new figure for each image
+            plt.figure(figsize=(10, 6))
+            # Convert from BGR (OpenCV format) to RGB (matplotlib format)
+            plt.imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+            plt.title(self.images[index])
+            plt.axis('off')
+            plt.show()
 
-                # Filter detections for the current frame
-                if file is not None:
-                    frame_data = det_data[det_data['frame'] == image_no]
-                else:
-                    frame_data = pd.DataFrame()
 
-                # Draw bounding boxes and labels on the image
-                for _, row in frame_data.iterrows():
-                    object_id = int(row['ID'])
+def main():
+    # Specify dataset and visualization parameters
+    dataset = "fjord_2min_2023-08"
+    # Create visualizer object with tracking visualization
+    visualizer = Visualizer(dataset, image_format="JPG", stage="preprocessing", start_index=0, length=10)
+    # Display individual frames
+    visualizer.pyplot()
+    # Render and display video
+    visualizer.render_video()
 
-                    # Assign a random color to each object ID (if not already assigned)
-                    if object_id not in colormap:
-                        np.random.seed(object_id)  # Ensure consistent color assignment
-                        color = tuple(map(int, np.random.randint(0, 255, size=3)))
-                        colormap[object_id] = color
-                    color = colormap[object_id]
 
-                    # Extract bounding box coordinates
-                    bbox_left, bbox_top = int(row['bbox_left']), int(row['bbox_top'])
-                    bbox_width, bbox_height = int(row['bbox_width']), int(row['bbox_height'])
-
-                    # Draw the bounding box and label on the image
-                    cv2.rectangle(img, (bbox_left, bbox_top), (bbox_left + bbox_width, bbox_top + bbox_height), color, 2)
-                    cv2.putText(img, str(object_id), (bbox_left, bbox_top - 5), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
-
-                # Display the image
-                plt.figure(figsize=(10, 6))
-                plt.imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-                plt.title(img_name)
-                plt.axis('off')
-                plt.show()
-
-    # Save the image if required
-    if save_images:
-        output_path = os.path.join(DATA_DIR, dataset, "results", "images")
-        cv2.imwrite(output_path, img)
-        print(f"Saved: {output_path}")
+if __name__ == "__main__":
+    main()

@@ -11,7 +11,6 @@ from PIL import Image
 from sklearn.model_selection import KFold
 from tqdm import tqdm
 import torchvision.transforms.functional as F
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from torchvision.models.detection import fasterrcnn_resnet50_fpn
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 from torch.utils.data import Dataset, DataLoader, Subset

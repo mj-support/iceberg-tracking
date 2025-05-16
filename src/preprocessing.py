@@ -402,7 +402,7 @@ def main():
     # Run the preprocessing pipeline
     preprocessor.process_images()
 
-    from utils.visualize import visualize
+    from utils.old.visualize import visualize
     visualize(dataset, None, start_index=200, length=10, save_images=False)
 
 

@@ -5,7 +5,7 @@ import pandas as pd
 from PIL import Image
 from scipy.optimize import linear_sum_assignment
 from utils.paths import DATA_DIR
-from utils.visualize import visualize
+from utils.visualize import Visualizer
 
 
 # Configure logging
@@ -634,7 +634,8 @@ def main():
         nested_threshold=0.8,
     )
 
-    visualize(dataset, tracker.tracking_file, start_index=200, length=10, save_images=False)
+    visualizer = Visualizer(dataset, image_format="JPG", stage="tracking", start_index=0, length=10)
+    visualizer.render_video()
 
 
 
