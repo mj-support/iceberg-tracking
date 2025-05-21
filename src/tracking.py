@@ -70,7 +70,7 @@ class IcebergTracker:
         Perform tracking of icebergs across frames with configurable parameters.
 
         Args:
-            cost_threshold: Score of the cost matrix needs to be lower than this threshold
+            cost_threshold: Maximum score threshold of the cost matrix needs for icebergs to be matched
             distance_top_k: Consider only the top X% closest new icebergs
             size_threshold: Minimum size similarity for a valid match
             iou_threshold: Minimum IoU to consider a valid match
