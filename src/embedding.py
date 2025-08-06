@@ -915,7 +915,7 @@ class IcebergEmbeddingsTrainer:
         self.model_path = os.path.join(DATA_DIR, self.dataset, "models", "embedding_model.pth")
         self.annotation_file = os.path.join(DATA_DIR, self.dataset, "annotations", "gt.txt")
         self.image_dir = os.path.join(DATA_DIR, self.dataset, "images", "raw")
-        self.embeddings_path = os.path.join(DATA_DIR, self.dataset, "annotations", "iceberg_gt_embeddings.pt")
+        self.embeddings_path = os.path.join(DATA_DIR, self.dataset, "embeddings", "gt_embeddings.pt")
 
         # Set up factory functions (use defaults if not provided)
         self.model_factory = model_factory or self._default_model_factory
@@ -924,6 +924,7 @@ class IcebergEmbeddingsTrainer:
 
         # Create models directory if it doesn't exist
         os.makedirs(os.path.join(DATA_DIR, self.dataset, "models"), exist_ok=True)
+        os.makedirs(os.path.join(DATA_DIR, self.dataset, "embeddings"), exist_ok=True)
 
         # Initialize components (will be set up later)
         self.model = None

@@ -65,7 +65,7 @@ class IcebergFeatureExtractor:
         self.image_dir = os.path.join(DATA_DIR, dataset, "images", "raw")
         self.gt_file = os.path.join(DATA_DIR, self.dataset, "annotations", "gt.txt")
         self.embedding_model_path = os.path.join(DATA_DIR, self.dataset, "models", "embedding_model.pth")
-        self.embeddings_path = os.path.join(DATA_DIR, self.dataset, "annotations", "iceberg_gt_embeddings.pt")
+        self.embeddings_path = os.path.join(DATA_DIR, self.dataset, "embeddings", "gt_embeddings.pt")
         self.output_file = os.path.join(DATA_DIR, self.dataset, "annotations", "similarity_features.json")
 
         # Initialize computation device and threshold storage
