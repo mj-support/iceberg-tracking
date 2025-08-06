@@ -1,28 +1,33 @@
+import cv2
+from datetime import timedelta
+import functools
+import math
+import matplotlib.pyplot as plt
+import os
+import random
+import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
-from PIL import Image
 import torchvision.transforms as transforms
-import os
-from sklearn.metrics import roc_auc_score, average_precision_score
-import matplotlib.pyplot as plt
-import random
-from typing import Dict, Callable, Optional, Any
-import math
 from dataclasses import dataclass
-from utils.helpers import DATA_DIR, extract_candidates, extract_matches, load_icebergs_by_frame
-import cv2
-import functools
+from PIL import Image
+from sklearn.metrics import roc_auc_score, average_precision_score
+from torch.utils.data import Dataset, DataLoader
+from typing import Dict, Callable, Optional, Any
+
+from utils.helpers import DATA_DIR, extract_candidates, extract_matches, load_icebergs_by_frame, parse_annotations
+
 
 """
 Iceberg Similarity Learning Pipeline
 
-This module implements a Siamese Neural Network training pipeline for learning embeddings
-that capture iceberg appearance similarity. The pipeline uses Vision Transformers as the
-backbone architecture and trains on pairs of iceberg crops to learn discriminative features
-for iceberg tracking and identification tasks.
+This module implements a Siamese Neural Network training pipeline for 
+learning and generating embeddings that capture iceberg appearance 
+similarity. The pipeline uses Vision Transformers as the backbone 
+architecture and trains on pairs of iceberg crops to learn 
+discriminative features for iceberg tracking and identification tasks.
 
 Key Components:
 - Vision Transformer backbone for feature extraction
@@ -99,7 +104,7 @@ class IcebergEmbeddingsConfig:
     learning_rate: float = 1e-4
     weight_decay: float = 1e-4
     num_epochs: int = 50
-    patience: int = 8
+    patience: int = 5
     min_delta: float = 0.002
 
     # Loss configuration
@@ -908,6 +913,9 @@ class IcebergEmbeddingsTrainer:
         self.config = config
         self.dataset = config.dataset
         self.model_path = os.path.join(DATA_DIR, self.dataset, "models", "embedding_model.pth")
+        self.annotation_file = os.path.join(DATA_DIR, self.dataset, "annotations", "gt.txt")
+        self.image_dir = os.path.join(DATA_DIR, self.dataset, "images", "raw")
+        self.embeddings_path = os.path.join(DATA_DIR, self.dataset, "annotations", "iceberg_gt_embeddings.pt")
 
         # Set up factory functions (use defaults if not provided)
         self.model_factory = model_factory or self._default_model_factory
@@ -1243,6 +1251,79 @@ class IcebergEmbeddingsTrainer:
 
         return results
 
+    def generate_iceberg_embeddings(self, txt_file, embeddings_path):
+        """
+        Extract feature vectors for all icebergs defined in an annotation file.
+
+        This method loads a trained Siamese network model and uses it to generate
+        feature embeddings for all iceberg detections in the ground truth file.
+        The embeddings are cached for efficient future use.
+
+        Args:
+            txt_file (str): Path to annotation file containing iceberg detections
+            embeddings_path (str): Path where computed embeddings will be saved
+        """
+        total_start_time = time.time()
+        print("Generate iceberg embeddings...")
+
+        # Step 1: Load the trained embedding model
+        model = SiameseNetwork(self.config).to(self.device)
+        model.load_state_dict(torch.load(self.model_path, map_location=self.device))
+
+        # Step 2: Set up validation transforms (no data augmentation for inference)
+        val_transform = transforms.Compose([
+            transforms.ToTensor(),  # Convert PIL image to tensor
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # ImageNet normalization
+        ])
+
+        # Set model to evaluation mode (disables dropout, batch norm training mode, etc.)
+        model = model.to(self.device)
+        model.eval()
+
+        # Step 3: Parse all detections from annotation file
+        all_detections = parse_annotations(txt_file)
+
+        # Sort detections by frame name
+        # This groups all crops from the same image together, maximizing cache hits
+        # for the DataLoader workers and dramatically improving performance
+        all_detections.sort(key=lambda x: x['frame'])
+
+        # Step 4: Create dataset and dataloader for batch processing
+        dataset = IcebergEmbeddingsDataset(detections=all_detections,
+                                           full_frame_dir=self.image_dir,
+                                           transform=val_transform,
+                                           target_size=224)
+
+        # The cache works per-worker. With 4 workers, an image might be loaded
+        # up to 4 times (once by each worker), but this is still a massive
+        # improvement over loading it thousands of times without caching.
+        dataloader = DataLoader(dataset, batch_size=32, shuffle=False, num_workers=4, pin_memory=True)
+
+        # Step 5: Extract features for all detections
+        features_dict = {}
+        print(f"Extracting features from {len(all_detections)} detected icebergs...")
+
+        with torch.no_grad():  # Disable gradient computation for inference
+            # Process images in batches for efficiency
+            for image_batch, name_batch in dataloader:
+                image_batch = image_batch.to(self.device)
+
+                # Extract features using the backbone of the Siamese network
+                feature_batch = model.backbone(image_batch)
+
+                # Store features for each iceberg detection
+                for i, img_name in enumerate(name_batch):
+                    features_dict[img_name] = feature_batch[i].cpu()
+
+        print("Generating embeddings complete.")
+
+        # Step 6: Save computed features for future use
+        torch.save(features_dict, embeddings_path)
+        print(f"Embeddings saved to {embeddings_path}")
+
+        elapsed_time = timedelta(seconds=int(time.time() - total_start_time))
+        print(f"Generating embeddings completed in {elapsed_time}")
+
     def plot_results(self):
         """
         Plot training history and evaluation results.
@@ -1319,6 +1400,9 @@ class IcebergEmbeddingsTrainer:
 
             # Evaluation phase
             self.evaluate()
+
+            # Generation phase
+            self.generate_iceberg_embeddings(self.annotation_file, self.embeddings_path)
 
             # Visualization phase
             self.plot_results()
