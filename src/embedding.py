@@ -945,312 +945,54 @@ class IcebergEmbeddingsTrainer:
             'final_epoch': 0
         }
 
-    def _default_model_factory(self) -> SiameseNetwork:
+    def run_complete_pipeline(self) -> Dict[str, Any]:
         """
-        Default factory for creating the Siamese network model.
+        Run the complete training and evaluation pipeline.
+
+        This is the main entry point that orchestrates the entire process:
+        1. Data setup and preprocessing
+        2. Model initialization
+        3. Training with early stopping
+        4. Final evaluation
+        5. Results visualization
+        6. Summary reporting
 
         Returns:
-            SiameseNetwork: Initialized Siamese network with ViT backbone
+            Dict[str, Any]: Complete training and evaluation results
         """
-        return SiameseNetwork(self.config)
+        print("🚀 Starting Iceberg Similarity Training Pipeline")
+        print("=" * 60)
 
-    def _default_dataset_factory(self, transform, negative_ratio: float) -> IcebergComparisonDataset:
-        """
-        Default factory for creating comparison datasets.
+        try:
+            # Setup phase
+            self._setup_data()
+            self._setup_model()
 
-        Args:
-            transform (callable): Image transformations to apply
-            negative_ratio (float): Ratio of negative to positive pairs
-
-        Returns:
-            IcebergComparisonDataset: Initialized dataset
-        """
-        return IcebergComparisonDataset(self.config, transform=transform, negative_ratio=negative_ratio)
-
-    def _default_transform_factory(self) -> tuple:
-        """
-        Default factory for creating image transforms.
-
-        Creates separate transform pipelines for training and validation:
-        - Training: Includes data augmentation (color jitter, flips, rotation)
-        - Validation: Only normalization (no augmentation)
-
-        Returns:
-            tuple: (train_transform, val_transform)
-        """
-        # Training transforms with data augmentation
-        train_transform = transforms.Compose([
-            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
-            transforms.RandomHorizontalFlip(p=0.5),
-            transforms.RandomVerticalFlip(p=0.5),
-            transforms.RandomRotation(degrees=15),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ])
-
-        # Validation transforms without augmentation
-        val_transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ])
-
-        return train_transform, val_transform
-
-    def setup_data(self):
-        """
-        Setup data loaders for training and validation.
-
-        Creates datasets with appropriate transforms and negative sampling ratios,
-        then wraps them in DataLoaders with specified batch sizes and worker counts.
-        """
-        print("Setting up data loaders...")
-        train_transform, val_transform = self.transform_factory()
-
-        # Create datasets with different negative ratios for train/val
-        train_dataset = self.dataset_factory(train_transform, self.config.negative_ratio_train)
-        val_dataset = self.dataset_factory(val_transform, self.config.negative_ratio_val)
-
-        # Create data loaders
-        self.train_loader = DataLoader(
-            train_dataset,
-            batch_size=self.config.batch_size,
-            shuffle=True,  # Shuffle training data
-            num_workers=self.config.num_workers
-        )
-        self.val_loader = DataLoader(
-            val_dataset,
-            batch_size=self.config.val_batch_size,
-            shuffle=False,  # Don't shuffle validation data
-            num_workers=self.config.num_workers
-        )
-
-    def setup_model(self):
-        """
-        Setup model, optimizer, scheduler, and loss function.
-
-        Initializes all components needed for training:
-        - Model architecture and moves to device
-        - Optimizer with weight decay
-        - Learning rate scheduler
-        - Combined loss function
-        """
-        print("Setting up model...")
-
-        # Create model and move to device
-        self.model = self.model_factory().to(self.device)
-
-        # Print model information
-        total_params = sum(p.numel() for p in self.model.parameters())
-        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
-        print(f"Total parameters: {total_params:,}")
-        print(f"Trainable parameters: {trainable_params:,}")
-        print(f"Using device: {self.device}")
-
-        # Setup optimizer with AdamW (better than Adam for transformers)
-        self.optimizer = optim.AdamW(
-            self.model.parameters(),
-            lr=self.config.learning_rate,
-            weight_decay=self.config.weight_decay
-        )
-
-        # Setup cosine annealing learning rate scheduler
-        self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            self.optimizer,
-            T_max=self.config.num_epochs
-        )
-
-        # Setup combined loss function
-        self.criterion = CombinedLoss(
-            margin=self.config.loss_margin,
-            alpha=self.config.loss_alpha
-        )
-
-    def train_epoch(self) -> float:
-        """
-        Train for one epoch.
-
-        Performs one complete pass through the training dataset:
-        1. Sets model to training mode
-        2. Iterates through all training batches
-        3. Computes forward pass and loss
-        4. Performs backpropagation and parameter updates
-        5. Returns average loss for the epoch
-
-        Returns:
-            float: Average training loss for the epoch
-        """
-        self.model.train()  # Set model to training mode
-        total_loss = 0.0
-
-        for img1, img2, labels in self.train_loader:
-            # Move data to device
-            img1, img2, labels = img1.to(self.device), img2.to(self.device), labels.to(self.device)
-
-            # Zero gradients from previous iteration
-            self.optimizer.zero_grad()
-
-            # Forward pass through Siamese network
-            feat1, feat2 = self.model(img1, img2)
-
-            # Compute loss
-            loss = self.criterion(feat1, feat2, labels)
-
-            # Backward pass and optimization
-            loss.backward()
-            self.optimizer.step()
-
-            # Accumulate loss
-            total_loss += loss.item()
-
-        return total_loss / len(self.train_loader)
-
-    def validate_epoch(self) -> tuple:
-        """
-        Validate for one epoch.
-
-        Performs validation on the validation dataset:
-        1. Sets model to evaluation mode
-        2. Disables gradient computation
-        3. Computes predictions and losses
-        4. Calculates metrics (loss and AUC)
-        5. Returns validation metrics
-
-        Returns:
-            tuple: (average_validation_loss, validation_auc)
-        """
-        self.model.eval()  # Set model to evaluation mode
-        total_loss = 0.0
-        all_similarities = []
-        all_labels = []
-
-        with torch.no_grad():  # Disable gradient computation for efficiency
-            for img1, img2, labels in self.val_loader:
-                # Move data to device
-                img1, img2, labels = img1.to(self.device), img2.to(self.device), labels.to(self.device)
-
-                # Forward pass
-                feat1, feat2 = self.model(img1, img2)
-                loss = self.criterion(feat1, feat2, labels)
-
-                total_loss += loss.item()
-
-                # Compute similarities for AUC calculation
-                similarities = self.model.compute_similarity(feat1, feat2)
-                all_similarities.extend(similarities.cpu().numpy())
-                all_labels.extend(labels.cpu().numpy())
-
-        # Calculate average loss and AUC
-        avg_loss = total_loss / len(self.val_loader)
-        auc = roc_auc_score(all_labels, all_similarities)
-
-        return avg_loss, auc
-
-    def train(self):
-        """
-        Main training loop with early stopping.
-
-        Orchestrates the complete training process:
-        - Runs training and validation for each epoch
-        - Tracks best model based on validation AUC
-        - Implements early stopping to prevent overfitting
-        - Updates learning rate schedule
-        - Saves model checkpoints
-        - Logs progress and metrics
-        """
-        print("Starting training...")
-
-        best_auc = 0.0
-        patience_counter = 0
-
-        for epoch in range(self.config.num_epochs):
             # Training phase
-            train_loss = self.train_epoch()
-            self.history['train_losses'].append(train_loss)
+            self._train()
 
-            # Validation phase
-            val_loss, val_auc = self.validate_epoch()
-            self.history['val_losses'].append(val_loss)
-            self.history['val_aucs'].append(val_auc)
+            # Evaluation phase
+            self._evaluate()
 
-            # Check for improvement and save best model
-            if val_auc > best_auc + self.config.min_delta:
-                best_auc = val_auc
-                patience_counter = 0
-                torch.save(self.model.state_dict(), self.model_path)
-                print(f"  ✅ New best model saved! AUC: {best_auc:.4f}")
-            else:
-                patience_counter += 1
-                # Early stopping check
-                if patience_counter >= self.config.patience:
-                    print(f"  🛑 Early stopping triggered after {self.config.patience} epochs without improvement")
-                    self.history['early_stopped'] = True
-                    break
+            print(f"\n🎉 Training completed!")
+            print(f"Final AUC: {self.history['best_auc']:.4f}")
+            print(f"Early stopped: {self.history['early_stopped']}")
+            print(f"Final epoch: {self.history['final_epoch']}")
 
-            # Update learning rate
-            self.scheduler.step()
+            # Generation phase
+            self.generate_iceberg_embeddings(self.annotation_file, self.embeddings_path)
 
-            # Print progress
-            print(f'Epoch {epoch + 1}/{self.config.num_epochs}:')
-            print(f'  Train Loss: {train_loss:.4f}')
-            print(f'  Val Loss: {val_loss:.4f}')
-            print(f'  Val AUC: {val_auc:.4f}')
-            print(f'  Best AUC: {best_auc:.4f}')
-            print(f'  Patience: {patience_counter}/{self.config.patience}')
-            print('-' * 50)
+            # Visualization phase
+            self._plot_results()
 
-        # Update final history
-        self.history['best_auc'] = best_auc
-        self.history['final_epoch'] = epoch + 1
+            print("\n✅ Pipeline completed successfully!")
 
-    def evaluate(self) -> Dict[str, Any]:
-        """
-        Evaluate the trained model on validation set.
+            # Summary reporting
+            return self.history
 
-        Loads the best saved model and computes comprehensive evaluation metrics
-        including AUC, Average Precision, and similarity distributions.
-
-        Returns:
-            Dict[str, Any]: Dictionary containing evaluation results and metrics
-        """
-        print("Evaluating model...")
-
-        # Load best model weights
-        self.model.load_state_dict(torch.load(self.model_path))
-        self.model.eval()
-
-        all_similarities = []
-        all_labels = []
-
-        with torch.no_grad():
-            for img1, img2, labels in self.val_loader:
-                img1, img2, labels = img1.to(self.device), img2.to(self.device), labels.to(self.device)
-
-                # Get embeddings and compute similarities
-                feat1, feat2 = self.model(img1, img2)
-                similarities = self.model.compute_similarity(feat1, feat2)
-
-                all_similarities.extend(similarities.cpu().numpy())
-                all_labels.extend(labels.cpu().numpy())
-
-        # Compute evaluation metrics
-        auc = roc_auc_score(all_labels, all_similarities)
-        ap = average_precision_score(all_labels, all_similarities)
-
-        results = {
-            'auc': auc,
-            'average_precision': ap,
-            'similarities': all_similarities,
-            'labels': all_labels
-        }
-
-        # Add results to history for plotting
-        self.history.update(results)
-
-        print(f"Final Results:")
-        print(f"AUC: {auc:.4f}")
-        print(f"Average Precision: {ap:.4f}")
-
-        return results
+        except Exception as e:
+            print(f"❌ Pipeline failed with error: {str(e)}")
+            raise
 
     def generate_iceberg_embeddings(self, txt_file, embeddings_path):
         """
@@ -1265,7 +1007,7 @@ class IcebergEmbeddingsTrainer:
             embeddings_path (str): Path where computed embeddings will be saved
         """
         total_start_time = time.time()
-        print("Generate iceberg embeddings...")
+        print("\nGenerate iceberg embeddings...")
 
         # Step 1: Load the trained embedding model
         model = SiameseNetwork(self.config).to(self.device)
@@ -1325,7 +1067,314 @@ class IcebergEmbeddingsTrainer:
         elapsed_time = timedelta(seconds=int(time.time() - total_start_time))
         print(f"Generating embeddings completed in {elapsed_time}")
 
-    def plot_results(self):
+    def _default_model_factory(self) -> SiameseNetwork:
+        """
+        Default factory for creating the Siamese network model.
+
+        Returns:
+            SiameseNetwork: Initialized Siamese network with ViT backbone
+        """
+        return SiameseNetwork(self.config)
+
+    def _default_dataset_factory(self, transform, negative_ratio: float) -> IcebergComparisonDataset:
+        """
+        Default factory for creating comparison datasets.
+
+        Args:
+            transform (callable): Image transformations to apply
+            negative_ratio (float): Ratio of negative to positive pairs
+
+        Returns:
+            IcebergComparisonDataset: Initialized dataset
+        """
+        return IcebergComparisonDataset(self.config, transform=transform, negative_ratio=negative_ratio)
+
+    def _default_transform_factory(self) -> tuple:
+        """
+        Default factory for creating image transforms.
+
+        Creates separate transform pipelines for training and validation:
+        - Training: Includes data augmentation (color jitter, flips, rotation)
+        - Validation: Only normalization (no augmentation)
+
+        Returns:
+            tuple: (train_transform, val_transform)
+        """
+        # Training transforms with data augmentation
+        train_transform = transforms.Compose([
+            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.RandomVerticalFlip(p=0.5),
+            transforms.RandomRotation(degrees=15),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+
+        # Validation transforms without augmentation
+        val_transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+
+        return train_transform, val_transform
+
+    def _setup_data(self):
+        """
+        Setup data loaders for training and validation.
+
+        Creates datasets with appropriate transforms and negative sampling ratios,
+        then wraps them in DataLoaders with specified batch sizes and worker counts.
+        """
+        print("Setting up data loaders...")
+        train_transform, val_transform = self.transform_factory()
+
+        # Create datasets with different negative ratios for train/val
+        train_dataset = self.dataset_factory(train_transform, self.config.negative_ratio_train)
+        val_dataset = self.dataset_factory(val_transform, self.config.negative_ratio_val)
+
+        # Create data loaders
+        self.train_loader = DataLoader(
+            train_dataset,
+            batch_size=self.config.batch_size,
+            shuffle=True,  # Shuffle training data
+            num_workers=self.config.num_workers
+        )
+        self.val_loader = DataLoader(
+            val_dataset,
+            batch_size=self.config.val_batch_size,
+            shuffle=False,  # Don't shuffle validation data
+            num_workers=self.config.num_workers
+        )
+
+    def _setup_model(self):
+        """
+        Setup model, optimizer, scheduler, and loss function.
+
+        Initializes all components needed for training:
+        - Model architecture and moves to device
+        - Optimizer with weight decay
+        - Learning rate scheduler
+        - Combined loss function
+        """
+        print("Setting up model...")
+
+        # Create model and move to device
+        self.model = self.model_factory().to(self.device)
+
+        # Print model information
+        total_params = sum(p.numel() for p in self.model.parameters())
+        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        print(f"Total parameters: {total_params:,}")
+        print(f"Trainable parameters: {trainable_params:,}")
+        print(f"Using device: {self.device}")
+
+        # Setup optimizer with AdamW (better than Adam for transformers)
+        self.optimizer = optim.AdamW(
+            self.model.parameters(),
+            lr=self.config.learning_rate,
+            weight_decay=self.config.weight_decay
+        )
+
+        # Setup cosine annealing learning rate scheduler
+        self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            self.optimizer,
+            T_max=self.config.num_epochs
+        )
+
+        # Setup combined loss function
+        self.criterion = CombinedLoss(
+            margin=self.config.loss_margin,
+            alpha=self.config.loss_alpha
+        )
+
+    def _train_epoch(self) -> float:
+        """
+        Train for one epoch.
+
+        Performs one complete pass through the training dataset:
+        1. Sets model to training mode
+        2. Iterates through all training batches
+        3. Computes forward pass and loss
+        4. Performs backpropagation and parameter updates
+        5. Returns average loss for the epoch
+
+        Returns:
+            float: Average training loss for the epoch
+        """
+        self.model.train()  # Set model to training mode
+        total_loss = 0.0
+
+        for img1, img2, labels in self.train_loader:
+            # Move data to device
+            img1, img2, labels = img1.to(self.device), img2.to(self.device), labels.to(self.device)
+
+            # Zero gradients from previous iteration
+            self.optimizer.zero_grad()
+
+            # Forward pass through Siamese network
+            feat1, feat2 = self.model(img1, img2)
+
+            # Compute loss
+            loss = self.criterion(feat1, feat2, labels)
+
+            # Backward pass and optimization
+            loss.backward()
+            self.optimizer.step()
+
+            # Accumulate loss
+            total_loss += loss.item()
+
+        return total_loss / len(self.train_loader)
+
+    def _validate_epoch(self) -> tuple:
+        """
+        Validate for one epoch.
+
+        Performs validation on the validation dataset:
+        1. Sets model to evaluation mode
+        2. Disables gradient computation
+        3. Computes predictions and losses
+        4. Calculates metrics (loss and AUC)
+        5. Returns validation metrics
+
+        Returns:
+            tuple: (average_validation_loss, validation_auc)
+        """
+        self.model.eval()  # Set model to evaluation mode
+        total_loss = 0.0
+        all_similarities = []
+        all_labels = []
+
+        with torch.no_grad():  # Disable gradient computation for efficiency
+            for img1, img2, labels in self.val_loader:
+                # Move data to device
+                img1, img2, labels = img1.to(self.device), img2.to(self.device), labels.to(self.device)
+
+                # Forward pass
+                feat1, feat2 = self.model(img1, img2)
+                loss = self.criterion(feat1, feat2, labels)
+
+                total_loss += loss.item()
+
+                # Compute similarities for AUC calculation
+                similarities = self.model.compute_similarity(feat1, feat2)
+                all_similarities.extend(similarities.cpu().numpy())
+                all_labels.extend(labels.cpu().numpy())
+
+        # Calculate average loss and AUC
+        avg_loss = total_loss / len(self.val_loader)
+        auc = roc_auc_score(all_labels, all_similarities)
+
+        return avg_loss, auc
+
+    def _train(self):
+        """
+        Main training loop with early stopping.
+
+        Orchestrates the complete training process:
+        - Runs training and validation for each epoch
+        - Tracks best model based on validation AUC
+        - Implements early stopping to prevent overfitting
+        - Updates learning rate schedule
+        - Saves model checkpoints
+        - Logs progress and metrics
+        """
+        print("Starting training...")
+
+        best_auc = 0.0
+        patience_counter = 0
+
+        for epoch in range(self.config.num_epochs):
+            # Training phase
+            train_loss = self._train_epoch()
+            self.history['train_losses'].append(train_loss)
+
+            # Validation phase
+            val_loss, val_auc = self._validate_epoch()
+            self.history['val_losses'].append(val_loss)
+            self.history['val_aucs'].append(val_auc)
+
+            # Check for improvement and save best model
+            if val_auc > best_auc + self.config.min_delta:
+                best_auc = val_auc
+                patience_counter = 0
+                torch.save(self.model.state_dict(), self.model_path)
+                print(f"  ✅ New best model saved! AUC: {best_auc:.4f}")
+            else:
+                patience_counter += 1
+                # Early stopping check
+                if patience_counter >= self.config.patience:
+                    print(f"  🛑 Early stopping triggered after {self.config.patience} epochs without improvement")
+                    self.history['early_stopped'] = True
+                    break
+
+            # Update learning rate
+            self.scheduler.step()
+
+            # Print progress
+            print(f'Epoch {epoch + 1}/{self.config.num_epochs}:')
+            print(f'  Train Loss: {train_loss:.4f}')
+            print(f'  Val Loss: {val_loss:.4f}')
+            print(f'  Val AUC: {val_auc:.4f}')
+            print(f'  Best AUC: {best_auc:.4f}')
+            print(f'  Patience: {patience_counter}/{self.config.patience}')
+            print('-' * 50)
+
+        # Update final history
+        self.history['best_auc'] = best_auc
+        self.history['final_epoch'] = epoch + 1
+
+    def _evaluate(self) -> Dict[str, Any]:
+        """
+        Evaluate the trained model on validation set.
+
+        Loads the best saved model and computes comprehensive evaluation metrics
+        including AUC, Average Precision, and similarity distributions.
+
+        Returns:
+            Dict[str, Any]: Dictionary containing evaluation results and metrics
+        """
+        print("Evaluating model...")
+
+        # Load best model weights
+        self.model.load_state_dict(torch.load(self.model_path))
+        self.model.eval()
+
+        all_similarities = []
+        all_labels = []
+
+        with torch.no_grad():
+            for img1, img2, labels in self.val_loader:
+                img1, img2, labels = img1.to(self.device), img2.to(self.device), labels.to(self.device)
+
+                # Get embeddings and compute similarities
+                feat1, feat2 = self.model(img1, img2)
+                similarities = self.model.compute_similarity(feat1, feat2)
+
+                all_similarities.extend(similarities.cpu().numpy())
+                all_labels.extend(labels.cpu().numpy())
+
+        # Compute evaluation metrics
+        auc = roc_auc_score(all_labels, all_similarities)
+        ap = average_precision_score(all_labels, all_similarities)
+
+        results = {
+            'auc': auc,
+            'average_precision': ap,
+            'similarities': all_similarities,
+            'labels': all_labels
+        }
+
+        # Add results to history for plotting
+        self.history.update(results)
+
+        print(f"Final Results:")
+        print(f"AUC: {auc:.4f}")
+        print(f"Average Precision: {ap:.4f}")
+
+        return results
+
+    def _plot_results(self):
         """
         Plot training history and evaluation results.
 
@@ -1373,54 +1422,7 @@ class IcebergEmbeddingsTrainer:
         plt.tight_layout()
         plt.show()
 
-    def run_complete_pipeline(self) -> Dict[str, Any]:
-        """
-        Run the complete training and evaluation pipeline.
 
-        This is the main entry point that orchestrates the entire process:
-        1. Data setup and preprocessing
-        2. Model initialization
-        3. Training with early stopping
-        4. Final evaluation
-        5. Results visualization
-        6. Summary reporting
-
-        Returns:
-            Dict[str, Any]: Complete training and evaluation results
-        """
-        print("🚀 Starting Iceberg Similarity Training Pipeline")
-        print("=" * 60)
-
-        try:
-            # Setup phase
-            self.setup_data()
-            self.setup_model()
-
-            # Training phase
-            self.train()
-
-            # Evaluation phase
-            self.evaluate()
-
-            # Generation phase
-            self.generate_iceberg_embeddings(self.annotation_file, self.embeddings_path)
-
-            # Visualization phase
-            self.plot_results()
-
-            print("✅ Pipeline completed successfully!")
-
-            # Summary reporting
-            print(f"\n🎉 Training completed!")
-            print(f"Final AUC: {self.history['best_auc']:.4f}")
-            print(f"Early stopped: {self.history['early_stopped']}")
-            print(f"Final epoch: {self.history['final_epoch']}")
-
-            return self.history
-
-        except Exception as e:
-            print(f"❌ Pipeline failed with error: {str(e)}")
-            raise
 
 
 def main():

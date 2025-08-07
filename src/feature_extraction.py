@@ -4,6 +4,7 @@ import os
 import pandas as pd
 import torch
 import torch.nn.functional as F
+
 from utils.helpers import DATA_DIR, load_icebergs_by_frame, extract_candidates, extract_matches
 
 
@@ -102,16 +103,16 @@ class IcebergFeatureExtractor:
 
         # Step 4: Extract similarity features from ground truth data
         icebergs_by_frame = load_icebergs_by_frame(self.gt_file)
-        similarity_features = self.get_similarity_features(icebergs_by_frame, iceberg_embeddings)
+        similarity_features = self._get_similarity_features(icebergs_by_frame, iceberg_embeddings)
 
         # Step 5: Normalize features and compute comprehensive statistics
-        normalized_similarity_features = self.normalize_features(similarity_features)
-        iceberg_similarity_feature_stats = self.get_similarity_stats(similarity_features,
+        normalized_similarity_features = self._normalize_features(similarity_features)
+        iceberg_similarity_feature_stats = self._get_similarity_stats(similarity_features,
                                                                      normalized_similarity_features)
 
         # Step 6: Display and save results
         if self.print_stats:
-            self.print_similarity_stats(iceberg_similarity_feature_stats)
+            self._print_similarity_stats(iceberg_similarity_feature_stats)
 
         with open(self.output_file, 'w', encoding='utf-8') as f:
             json.dump(iceberg_similarity_feature_stats, f, ensure_ascii=False, indent=4)
@@ -119,7 +120,7 @@ class IcebergFeatureExtractor:
 
         return iceberg_similarity_feature_stats
 
-    def get_similarity_features(self, icebergs_by_frame, iceberg_embeddings):
+    def _get_similarity_features(self, icebergs_by_frame, iceberg_embeddings):
         """
         Compute similarity features for all matched iceberg pairs in ground truth data.
 
@@ -179,7 +180,7 @@ class IcebergFeatureExtractor:
         }
         return similarity_features
 
-    def normalize_features(self, similarity_features):
+    def _normalize_features(self, similarity_features):
         """
         Normalize all similarity features to [0,1] range and compute combined scores.
 
@@ -237,7 +238,7 @@ class IcebergFeatureExtractor:
 
         return normalized_similarity_features
 
-    def get_similarity_stats(self, similarity_features, normalized_similarity_features):
+    def _get_similarity_stats(self, similarity_features, normalized_similarity_features):
         """
         Compute comprehensive statistics for both raw and normalized similarity features.
 
@@ -256,19 +257,19 @@ class IcebergFeatureExtractor:
 
         # Compute statistics for raw similarity features
         similarity_features_stats = {}
-        similarity_features_stats["appearance"] = self.calculate_stats(similarity_features["appearance"])
-        similarity_features_stats["distance"] = self.calculate_stats(similarity_features["distance"])
-        similarity_features_stats["size"] = self.calculate_stats(similarity_features["size"])
+        similarity_features_stats["appearance"] = self._calculate_stats(similarity_features["appearance"])
+        similarity_features_stats["distance"] = self._calculate_stats(similarity_features["distance"])
+        similarity_features_stats["size"] = self._calculate_stats(similarity_features["size"])
         similarity_stats["similarity_features"] = similarity_features_stats
 
         # Compute statistics for normalized similarity features
         normalized_similarity_features_stats = {}
-        normalized_similarity_features_stats["appearance"] = self.calculate_stats(
+        normalized_similarity_features_stats["appearance"] = self._calculate_stats(
             normalized_similarity_features["appearance"])
-        normalized_similarity_features_stats["distance"] = self.calculate_stats(
+        normalized_similarity_features_stats["distance"] = self._calculate_stats(
             normalized_similarity_features["distance"])
-        normalized_similarity_features_stats["size"] = self.calculate_stats(normalized_similarity_features["size"])
-        normalized_similarity_features_stats["match_score"] = self.calculate_stats(
+        normalized_similarity_features_stats["size"] = self._calculate_stats(normalized_similarity_features["size"])
+        normalized_similarity_features_stats["match_score"] = self._calculate_stats(
             normalized_similarity_features["match_score"])
         similarity_stats["normalized_similarity_features"] = normalized_similarity_features_stats
 
@@ -277,7 +278,7 @@ class IcebergFeatureExtractor:
 
         return similarity_stats
 
-    def calculate_stats(self, similarity_values):
+    def _calculate_stats(self, similarity_values):
         """
         Calculate basic statistical measures for a list of similarity values.
 
@@ -297,7 +298,7 @@ class IcebergFeatureExtractor:
         }
         return similarity_stats
 
-    def print_similarity_stats(self, similarity_stats):
+    def _print_similarity_stats(self, similarity_stats):
         """
         Print formatted statistics tables for similarity features and thresholds.
 
