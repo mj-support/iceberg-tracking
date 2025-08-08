@@ -448,13 +448,48 @@ def min_max_normalize(v, v_min, v_max):
 
     Returns:
         float: Normalized value in [0, 1] range
-
-    Note:
-        If v_min == v_max, this will result in division by zero.
-        Consider handling this edge case for production code.
     """
     return (v - v_min) / (v_max - v_min)
 
+
+def get_gt_thresholds(dataset, image_format):
+    """
+    Retrieve or compute similarity thresholds from ground truth data for iceberg tracking.
+
+    This function provides a convenient interface to obtain the statistical thresholds
+    needed for iceberg tracking decisions. It will either load pre-computed thresholds
+    from a cached file or trigger the complete feature extraction pipeline to compute
+    them if they don't exist.
+
+    Args:
+        dataset (str): Name of the dataset to process (e.g., "hill_2min_2023-08")
+        image_format (str): Format of input images (e.g., "JPG", "PNG")
+
+    Returns:
+        dict: Dictionary containing threshold values with keys:
+            - "appearance" (float): Minimum appearance similarity for valid matches
+            - "distance" (float): Maximum distance threshold for spatial consistency
+            - "size" (float): Minimum size similarity for valid matches
+            - "match_score" (float): Minimum combined score for accepting matches
+    """
+    # Create feature extractor instance for the specified dataset
+    extractor = IcebergFeatureExtractor(dataset, image_format)
+
+    # Check if similarity features have already been computed
+    if not os.path.exists(extractor.output_file):
+        print("Similarity features not found. Computing features and thresholds...")
+        print("This may take some time, especially for large datasets.")
+        # Run complete feature extraction pipeline to generate thresholds
+        extractor.generate_similarity_features()
+
+    # Load pre-computed similarity features and extract thresholds
+    print(f"Loading thresholds from {extractor.output_file}...")
+    with open(extractor.output_file, 'r', encoding='utf-8') as f:
+        similarity_features = json.load(f)
+        thresholds = similarity_features['thresholds']
+
+    print("Thresholds loaded successfully.")
+    return thresholds
 
 def main():
     # Configuration for the dataset to process
