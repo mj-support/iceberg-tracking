@@ -1399,29 +1399,20 @@ def main():
 
     # Create custom configuration with desired parameters
     config = IcebergDetectionConfig(
-        # Dataset parameters
         dataset=dataset,
         image_format=image_format,
         masking=True,
         feature_extraction=True,
         num_workers=4,
-
-        # Training parameters
         num_epochs=10,
         k_folds=5,
         patience=3,
-
-        # Inference/postprocessing parameters
         confidence_threshold=0.1,
     )
 
-    # Create detector instance
+    # Create detector instance, train the model and run inference
     detector = IcebergDetector(config=config)
-
-    # Phase 1: Train the model
     detector.train()
-
-    # Phase 2: Run inference
     detector.predict()
 
 
