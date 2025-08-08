@@ -1,249 +1,491 @@
-import os
 import copy
 import cv2
-import multiprocessing as mp
-import torch
-import time
 import numpy as np
 import pandas as pd
+import os
+import time
+import torch
+import torchvision.transforms as transforms
+import torchvision.transforms.functional as F
+from dataclasses import dataclass
 from datetime import timedelta
 from PIL import Image
 from sklearn.model_selection import KFold
-from tqdm import tqdm
-import torchvision.transforms.functional as F
-from torchvision.models.detection import fasterrcnn_resnet50_fpn
-from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 from torch.utils.data import Dataset, DataLoader, Subset
-from preprocessing import get_tiles_with_overlap
-from utils.paths import DATA_DIR
+from torchvision.models.detection import fasterrcnn_resnet50_fpn
+from torchvision.models.detection import FasterRCNN_ResNet50_FPN_Weights
+from torchvision.models.detection.anchor_utils import AnchorGenerator
+from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
+from typing import Tuple, List
+
+from embedding import IcebergEmbeddingsConfig, IcebergEmbeddingsTrainer
+from utils.helpers import DATA_DIR, sort_file
+
+"""
+Iceberg Detection System using Faster R-CNN
+
+This module provides a comprehensive system for detecting icebergs in timelapse images
+using a Faster R-CNN deep learning model. The system includes training with cross-validation,
+multi-scale inference, sliding window detection, and postprocessing capabilities.
+
+Key Features:
+- K-fold cross-validation training
+- Multi-scale detection for robustness
+- Sliding window inference for large images  
+- Intelligent overlap removal between detection methods
+- Optional masking and postprocessing
+- Embedding generation for detected icebergs
+"""
 
 
-class IcebergDataset(Dataset):
-    def __init__(self, image_dir, image_format, det_file=None, transforms=None):
+# ================================
+# CONFIGURATION CLASS
+# ================================
+
+@dataclass
+class IcebergDetectionConfig:
+    """
+    Configuration class to centralize all hyperparameters and settings for iceberg detection.
+
+    This class uses dataclass to provide a clean interface for configuring all aspects
+    of the detection pipeline, from data loading to model training and inference.
+
+    Attributes:
+        dataset (str): Name of the dataset directory
+        image_format (str): File extension for images (e.g., 'JPG', 'PNG')
+        masking (bool): Whether to apply masking during preprocessing to remove landareas
+        num_workers (int): Number of worker processes for data loading
+
+        # Model Architecture Parameters
+        num_classes (int): Number of classes (background + iceberg = 2)
+        anchor_sizes (Tuple): Anchor box sizes for different feature pyramid levels
+        anchor_aspect_ratios (Tuple): Aspect ratios for anchor boxes
+
+        # Training Parameters
+        k_folds (int): Number of folds for cross-validation
+        num_epochs (int): Maximum epochs per fold
+        patience (int): Early stopping patience (epochs without improvement)
+        batch_size (int): Training batch size
+        learning_rate (float): Initial learning rate for optimizer
+        momentum (float): SGD momentum parameter
+        weight_decay (float): L2 regularization weight
+
+        # Detection Parameters
+        box_detections_per_img (int): Maximum detections per image
+        box_nms_thresh (float): NMS threshold for final detections
+        rpn_nms_thresh (float): NMS threshold for RPN proposals
+        rpn_score_thresh (float): Score threshold for RPN proposals
+
+        # Inference Parameters
+        confidence_threshold (float): Minimum confidence for keeping detections
+        scales (List[float]): Scales for multi-scale detection
+        window_size (Tuple[int, int]): Size of sliding windows
+        overlap (float): Overlap ratio between sliding windows
+        iou_threshold (float): IoU threshold for removing duplicate detections
+
+        # Postprocessing Parameters
+        postprocess (bool): Whether to apply postprocessing filters
+        edge_tolerance (int): Pixel tolerance for edge detection filtering
+        mask_ratio_threshold (float): Threshold for mask-based filtering
+        feature_extraction (bool): Whether to extract embeddings from detections
+
+        # Hardware Configuration
+        device (str): Computing device (GPU/CPU)
+    """
+    # Data configuration
+    dataset: str
+    image_format: str = "JPG"
+    masking: bool = False
+    num_workers: int = 4
+
+    # Model parameters - These define the Faster R-CNN architecture
+    num_classes: int = 2  # Background + iceberg
+    anchor_sizes: Tuple[Tuple[int, ...], ...] = ((16,), (32,), (64,), (128,), (256,))
+    anchor_aspect_ratios: Tuple[Tuple[float, ...], ...] = ((0.5, 1.0, 2.0),) * 5
+
+    # Training parameters - Control the training process
+    k_folds: int = 5
+    num_epochs: int = 10
+    patience: int = 3  # Early stopping patience
+    batch_size: int = 2
+    learning_rate: float = 0.005
+    momentum: float = 0.9
+    weight_decay: float = 0.0005
+
+    # Detection parameters - Control model inference behavior
+    box_detections_per_img: int = 1000
+    box_nms_thresh: float = 0.3
+    rpn_nms_thresh: float = 0.5
+    rpn_score_thresh: float = 0.0
+
+    # Inference parameters - Control prediction pipeline
+    confidence_threshold: float = 0.0
+    scales: List[float] = None  # Will be set in __post_init__
+    window_size: Tuple[int, int] = (1024, 1024)
+    overlap: float = 0.2
+    iou_threshold: float = 0.3
+
+    # Postprocessing parameters - Control filtering of detections
+    postprocess: bool = True
+    edge_tolerance: int = 0
+    mask_ratio_threshold: float = 0.02
+    feature_extraction: bool = True
+
+    # Device configuration
+    device: str = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    def __post_init__(self):
         """
-        Dataset for iceberg detection that handles both training and inference modes.
+        Set default values for mutable types after initialization.
 
-        This dataset class loads images and their corresponding bounding box annotations
-        for icebergs. In training mode (det_file provided), it reads annotations from a CSV file.
-        In inference mode (det_file=None), it simply loads images from the directory.
+        This is necessary because mutable default arguments in dataclasses
+        can cause issues. We set them here after object creation.
+        """
+        if self.scales is None:
+            self.scales = [0.5, 0.75, 1.0, 1.25, 1.5]
+
+
+# ================================
+# DATASET CLASS
+# ================================
+class IcebergDetectionDataset(Dataset):
+    """
+    Custom PyTorch Dataset for iceberg detection with improved error handling and logging.
+
+    This dataset class handles both training mode (with annotations) and inference mode
+    (image-only). It provides robust error handling and can recover from corrupted
+    images by skipping to the next available image.
+
+    Args:
+        image_dir (str): Directory containing input images
+        det_file (str, optional): Path to detection/annotation file for training
+        transforms (callable, optional): Transform function to apply to images
+        config (IcebergDetectionConfig): Configuration object
+
+    Attributes:
+        img_folder (str): Path to image directory
+        image_format (str): File extension for images
+        transforms (callable): Image transformation function
+        config (IcebergDetectionConfig): Configuration settings
+        detections (pd.DataFrame): Loaded annotations (training mode only)
+        unique_images (List[str]): List of unique image names
+    """
+
+    def __init__(self, image_dir, det_file=None, transforms=None, config=None):
+        """
+        Initialize the dataset.
 
         Args:
-            image_dir (str): Directory containing the image files
-            image_format (str): File formats of the images (file extension)
-            det_file (str, optional): Path to detection/annotation file containing bounding boxes.
-                                     If None, the dataset operates in inference-only mode.
-            transforms (callable, optional): Image transformations to apply to each image
+            image_dir (str): Directory containing input images
+            det_file (str, optional): Path to annotations file (for training)
+            transforms (callable, optional): Image transformations to apply
+            config (IcebergDetectionConfig): Configuration object
         """
         self.img_folder = image_dir
-        self.image_format = image_format
+        self.image_format = f".{config.image_format}"
         self.transforms = transforms
+        self.config = config
         self.detections = None
         self.unique_images = []
 
+        # Load data based on whether we have annotations (training vs inference)
+        self._load_data(det_file)
+
+    def _load_data(self, det_file):
+        """
+        Load annotations or image list based on mode.
+
+        Args:
+            det_file (str, optional): Path to detection file with annotations
+
+        In training mode (det_file exists), loads annotations from CSV file.
+        In inference mode (no det_file), loads list of image files for processing.
+        """
         if det_file and os.path.exists(det_file):
-            # Read the detection file with pandas for training/validation mode
+            # Training mode - load annotations
             column_names = ['image', 'iceberg_id', 'bb_left', 'bb_top', 'bb_width', 'bb_height',
                             'conf', 'unused_1', 'unused_2', 'unused_3']
-            # Load CSV with predefined column names, containing bounding box annotations
             self.detections = pd.read_csv(det_file, names=column_names)
-            # Extract unique image identifiers from annotations
-            self.unique_images = self.detections['image'].unique()
+            self.unique_images = self.detections['image'].unique().tolist()
+            print(f"Loaded {len(self.unique_images)} images with annotations")
         else:
-            # Get filenames without extensions for all valid image files
+            # Inference mode - load image file list
             self.unique_images = [
-                os.path.splitext(f)[0] for f in os.listdir(image_dir)
+                os.path.splitext(f)[0] for f in os.listdir(self.img_folder)
                 if f.endswith(self.image_format)
             ]
+            print(f"Loaded {len(self.unique_images)} images for inference")
 
     def __getitem__(self, index):
         """
-        Retrieve an item from the dataset by index.
-
-        In training mode, returns the image and its corresponding target dictionary
-        containing bounding boxes and labels. In inference mode, returns the image
-        and a minimal target with only the image_id and file_name.
+        Get dataset item with comprehensive error handling.
 
         Args:
-            index (int): Index of the item to retrieve
+            index (int): Index of item to retrieve
 
         Returns:
-            tuple: (image, target) where:
-                - image is the transformed PIL image
-                - target is a dictionary containing bounding boxes, labels, etc. in training mode,
-                  or just image_id and file_name in inference mode
+            tuple: (image, target) for training mode or (image, metadata) for inference
 
-        Note:
-            If an image has no valid bounding boxes in training mode,
-            this method recursively tries the next image.
+        The method implements robust error recovery - if an image fails to load,
+        it automatically tries the next image in the sequence to avoid crashes.
         """
-        # Get image identifier from our list
-        img_name = self.unique_images[index]
-        img_file = os.path.join(self.img_folder, f"{img_name}{self.image_format}")
+        try:
+            img_name = self.unique_images[index]
+            img_file = os.path.join(self.img_folder, f"{img_name}{self.image_format}")
 
-        # Load image and convert to RGB format
-        img = Image.open(img_file).convert("RGB")
-        # Create tensor for image ID
-        image_id = torch.tensor([index])
+            # Check if image file exists
+            if not os.path.exists(img_file):
+                raise FileNotFoundError(f"Image file not found: {img_file}")
 
-        # For inference mode (no detections file) - return minimal target
-        if self.detections is None:
-            if self.transforms:
-                img = self.transforms(img)
-            return img, {"image_id": image_id, "file_name": img_name}
+            # Load and convert image to RGB
+            img = Image.open(img_file).convert("RGB")
+            image_id = torch.tensor([index])
 
-        # For training/validation mode - process annotations
-        # Filter detections for this specific image
+            # Inference mode - return image and metadata only
+            if self.detections is None:
+                if self.transforms:
+                    img = self.transforms(img)
+                return img, {"image_id": image_id, "file_name": img_name}
+
+            # Training mode - process annotations
+            return self._process_training_item(img, img_name, image_id, index)
+
+        except Exception as e:
+            print(f"Error loading item {index}: {e}")
+            # Fallback: try next item to avoid training crashes
+            return self.__getitem__((index + 1) % len(self.unique_images))
+
+    def _process_training_item(self, img, img_name, image_id, index):
+        """
+        Process training item with annotations.
+
+        Args:
+            img (PIL.Image): Loaded image
+            img_name (str): Name of the image file
+            image_id (torch.Tensor): Unique image identifier
+            index (int): Current index (for fallback if no valid boxes)
+
+        Returns:
+            tuple: (image, target_dict) where target_dict contains bounding boxes,
+                   labels, and other metadata required by Faster R-CNN
+        """
+        # Get all detections for this image
         img_detections = self.detections[self.detections['image'] == img_name]
-        boxes = []
-        labels = []
+        boxes, labels = self._extract_valid_boxes(img_detections)
 
-        # Process all detections for this image
-        for _, det in img_detections.iterrows():
-            xmin = det['bb_left']
-            ymin = det['bb_top']
-            width = det['bb_width']
-            height = det['bb_height']
-
-            # Convert from (x, y, width, height) to (x1, y1, x2, y2) format required by PyTorch
-            xmax = xmin + width
-            ymax = ymin + height
-
-            # Filter out invalid bounding boxes with zero width or height
-            if width > 0 and height > 0:
-                boxes.append([xmin, ymin, xmax, ymax])
-                labels.append(1)  # Single class for iceberg (label 1, background is 0)
-
-        # If no valid bounding boxes, we skip the image and try the next one
-        # This prevents training issues with images that have no valid annotations
+        # Skip images without valid annotations
         if len(boxes) == 0:
             return self.__getitem__((index + 1) % len(self.unique_images))
 
-        # Convert lists to tensors with appropriate data types
+        # Convert to PyTorch tensors
         boxes = torch.as_tensor(boxes, dtype=torch.float32)
         labels = torch.as_tensor(labels, dtype=torch.int64)
-        # Calculate area of each bounding box (used by some loss functions)
+
+        # Calculate areas for each bounding box
         area = (boxes[:, 3] - boxes[:, 1]) * (boxes[:, 2] - boxes[:, 0])
-        # iscrowd indicates whether each object instance is a group of objects (0 = no)
+
+        # Create iscrowd tensor (all zeros - no crowd annotations)
         iscrowd = torch.zeros((len(boxes),), dtype=torch.int64)
 
-        # Create target dictionary in the format expected by Faster R-CNN
+        # Create target dictionary as expected by Faster R-CNN
         target = {
             'boxes': boxes,
             'labels': labels,
             'image_id': image_id,
             'area': area,
             'iscrowd': iscrowd,
-            'file_name': img_name  # Keep filename for reference
+            'file_name': img_name
         }
 
-        # Apply transformations if provided
+        # Apply transformations if specified
         if self.transforms:
             img = self.transforms(img)
 
         return img, target
 
-    def __len__(self):
+    def _extract_valid_boxes(self, img_detections):
         """
-        Get the total number of samples in the dataset.
+        Extract valid bounding boxes from annotations.
+
+        Args:
+            img_detections (pd.DataFrame): Detections for a single image
 
         Returns:
-            int: Number of unique images in the dataset
+            tuple: (boxes, labels) where boxes is list of [xmin, ymin, xmax, ymax]
+                   and labels is list of class labels (all 1 for iceberg)
+
+        Filters out invalid boxes (zero or negative width/height) that could
+        cause training instability.
         """
+        boxes = []
+        labels = []
+
+        for _, det in img_detections.iterrows():
+            xmin, ymin = det['bb_left'], det['bb_top']
+            width, height = det['bb_width'], det['bb_height']
+
+            # Only keep boxes with positive dimensions
+            if width > 0 and height > 0:
+                boxes.append([xmin, ymin, xmin + width, ymin + height])
+                labels.append(1)  # Iceberg class (background is 0)
+
+        return boxes, labels
+
+    def __len__(self):
+        """Return the total number of images in the dataset."""
         return len(self.unique_images)
 
 
+# ================================
+# MAIN DETECTOR CLASS
+# ================================
 class IcebergDetector:
-    def __init__(self, dataset, image_format, tile=True, num_classes=2):
-        """
-        A comprehensive class for iceberg detection that handles both training and inference as well as postprocessing.
+    """
+    Main iceberg detection class with integrated training, inference, and postprocessing.
 
-        This class provides methods for training models with k-fold cross-validation,
-        early stopping, and inference with custom confidence threshold. It manages the
-        model lifecycle including building, saving, loading, and using the model.
+    This class provides a complete pipeline for iceberg detection:
+    1. Training with k-fold cross-validation
+    2. Multi-scale and sliding window inference
+    3. Intelligent overlap removal between detection methods
+    4. Postprocessing with masking and edge filtering
+    5. Feature extraction from detected icebergs
+
+    The system is designed to be robust and production-ready, with comprehensive
+    error handling, progress tracking, and configurable parameters.
+
+    Args:
+        config (IcebergDetectionConfig): Configuration object with all parameters
+
+    Attributes:
+        config (IcebergDetectionConfig): Configuration settings
+        dataset (str): Dataset name
+        image_format (str): Image file extension
+        masking (bool): Whether masking is enabled
+        device (torch.device): Computing device (GPU/CPU)
+        model (torch.nn.Module): The trained Faster R-CNN model
+
+        # File paths
+        model_file (str): Path to saved model weights
+        image_dir (str): Directory containing input images
+        annotations_file (str): Path to ground truth annotations
+        detections_file (str): Path to output detections
+        embeddings_path (str): Path to extracted feature embeddings
+    """
+
+    def __init__(self, config: IcebergDetectionConfig):
+        """
+        Initialize the iceberg detector with configuration.
+
+        Sets up all necessary directories and file paths based on the dataset
+        configuration. Creates output directories if they don't exist.
 
         Args:
-            dataset (str): Name of the dataset, used for organizing files
-            image_format (str): File formats of the images (file extension)
-            tile (bool): Whether the images are split into tiles (default: True)
-            num_classes (int): Number of classes including background (default: 2,
-                               where 0 is background and 1 is iceberg)
+            config (IcebergDetectionConfig): Configuration object with all parameters
         """
-        self.dataset = dataset
-        self.image_format = f".{image_format}"
-        self.num_classes = num_classes
-        self.tile = tile
-        # Automatically use GPU if available, else CPU
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.config = config
+        self.dataset = config.dataset
+        self.image_format = f".{config.image_format}"
+        self.masking = config.masking
+        self.device = config.device
         self.model = None
 
-        # Create directory structure if not exists
-        # Ensures all required folders are available for data organization
-        os.makedirs(os.path.join(DATA_DIR, dataset, "models"), exist_ok=True)
-        os.makedirs(os.path.join(DATA_DIR, dataset, "detections"), exist_ok=True)
+        # Create necessary output directories
+        base_path = os.path.join(DATA_DIR, self.dataset)
+        os.makedirs(os.path.join(base_path, "models"), exist_ok=True)
+        os.makedirs(os.path.join(base_path, "detections"), exist_ok=True)
 
-        # Define all file and directory paths
-        self.model_file = os.path.join(DATA_DIR, dataset, "models", "iceberg_detector.pth")
-        self.images_dir = os.path.join(DATA_DIR, dataset, "images", "processed")
-        self.annotations_file = os.path.join(DATA_DIR, dataset, "annotations", "gt.txt")
-        if self.tile:
-            self.detections_file = os.path.join(DATA_DIR, dataset, "detections", "det_tiles.txt")
-            self.detections_file_merged = os.path.join(DATA_DIR, dataset, "detections", "det.txt")
-        else:
-            self.detections_file = os.path.join(DATA_DIR, dataset, "detections", "det.txt")
+        # Define all file paths used throughout the pipeline
+        self.model_file = os.path.join(base_path, "models", "iceberg_detector.pth")
+        self.image_dir = os.path.join(base_path, "images", "raw")
+        self.annotations_file = os.path.join(base_path, "annotations", "gt.txt")
+        self.detections_file = os.path.join(base_path, "detections", "det.txt")
+        self.embeddings_path = os.path.join(DATA_DIR, self.dataset, "embeddings", "det_embeddings.pt")
+        self.iceberg_embedding_model = os.path.join(base_path, "models", "embedding_model.pth")
 
-    def train(self, k_folds=5, num_epochs=10, patience=3, batch_size=2, learning_rate=0.005):
+        # Set up mask file path if masking is enabled
+        if self.masking:
+            self.mask_file = os.path.join(DATA_DIR, self.dataset, "images", f"mask{self.image_format}")
+
+        print(f"Initialized IcebergDetector for dataset: {self.dataset}")
+        print(f"Device: {self.device}")
+
+    def preprocessing(self):
         """
-        Train the model using k-fold cross-validation with early stopping and timing metrics.
+        Apply preprocessing (masking) if enabled in configuration.
 
-        This method implements a complete training pipeline with several advanced features:
-        1. K-fold cross-validation to improve generalization
-        2. Early stopping to prevent overfitting
-        3. Comprehensive timing metrics for total and per-epoch progress
-        4. Time remaining estimates based on running averages
-        5. Best model selection based on validation loss
+        This method applies image masking to remove unwanted regions (like land areas)
+        from satellite imagery before training or inference. The masked images are
+        saved to a separate 'processed' directory to avoid modifying originals.
 
-        The method tracks training across all folds, saving only the best-performing model
-        based on validation loss. Progress and timing information is displayed throughout
-        the training process.
-
-        Args:
-            k_folds (int): Number of folds for cross-validation, dividing the dataset
-                           into k parts for rotating validation
-            num_epochs (int): Maximum number of training epochs per fold
-            patience (int): Number of consecutive epochs with no improvement before
-                           triggering early stopping
-            batch_size (int): Number of samples per batch for training and validation
-            learning_rate (float): Learning rate for the optimizer
+        The masking process:
+        1. Loads a binary mask image
+        2. For each input image, sets masked pixels to black (0,0,0)
+        3. Saves processed images to output directory
+        4. Updates image_dir to point to processed images
         """
-        # Start timing the entire training process
-        total_start_time = time.time()
+        if not self.masking:
+            return
+
+        output_dir = os.path.join(DATA_DIR, self.dataset, "images", "processed")
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Only process if output directory is empty
+        if not any(os.scandir(output_dir)):
+            print("\nStarting preprocessing: applying masks")
+            self._apply_masking(output_dir)
+            self.image_dir = output_dir
+            print("\nFinished preprocessing")
+
+    def train(self):
+        """
+        Train the model with k-fold cross-validation.
+
+        This method implements a comprehensive training pipeline:
+        1. Preprocessing (masking if enabled)
+        2. Dataset creation with proper transforms
+        3. K-fold cross-validation to ensure robust model selection
+        4. Early stopping to prevent overfitting
+        5. Progress tracking with time estimates
+        6. Model selection based on validation loss
+
+        The training uses SGD optimizer with momentum and tracks both training
+        and validation losses. The best model across all folds is saved.
+        """
+        # Extract configuration parameters
+        k_folds = self.config.k_folds
+        num_epochs = self.config.num_epochs
+        patience = self.config.patience
+        batch_size = self.config.batch_size
+        learning_rate = self.config.learning_rate
+
+        print("=== TRAINING PHASE ===")
         print(f"\nStarting training with {k_folds}-fold cross-validation")
 
-        # Create complete dataset with transformations
-        transformed_dataset = IcebergDataset(
-            image_dir=self.images_dir,
-            image_format=self.image_format,
+        # Apply preprocessing (masking) if configured
+        self.preprocessing()
+
+        # Create training dataset with transforms
+        dataset = IcebergDetectionDataset(
+            image_dir=self.image_dir,
             det_file=self.annotations_file,
-            transforms=self._get_transform()
+            transforms=self._get_transforms(),
+            config=self.config
         )
 
-        # Initialize k-fold cross-validation splitter with fixed random seed for reproducibility
+        # Initialize cross-validation and tracking variables
+        total_start_time = time.time()
         kf = KFold(n_splits=k_folds, shuffle=True, random_state=42)
-        best_val_loss_overall = float('inf')  # Track best loss across all folds
-        best_model_state_overall = None  # Save best model state across all folds
+        best_val_loss_overall = float('inf')
+        best_model_state_overall = None
 
-        # Iterate through each fold in the cross-validation
-        for fold, (train_idx, val_idx) in enumerate(kf.split(transformed_dataset)):
-            # Start timing for this specific fold
-            fold_start_time = time.time()
+        # Cross-validation training loop
+        for fold, (train_idx, val_idx) in enumerate(kf.split(dataset)):
             print(f"\nFold {fold + 1}/{k_folds}")
 
-            # Create training and validation subsets based on the fold split
-            train_subset = Subset(transformed_dataset, train_idx)
-            val_subset = Subset(transformed_dataset, val_idx)
+            # Create data subsets and loaders for this fold
+            train_subset = Subset(dataset, train_idx)
+            val_subset = Subset(dataset, val_idx)
 
-            # Create data loaders with appropriate settings
-            # The collate_fn is needed to handle variable-sized images and targets
             train_loader = DataLoader(
                 train_subset, batch_size=batch_size, shuffle=True,
                 num_workers=4, collate_fn=lambda x: tuple(zip(*x))
@@ -253,268 +495,323 @@ class IcebergDetector:
                 num_workers=4, collate_fn=lambda x: tuple(zip(*x))
             )
 
-            # Initialize a fresh model for each fold to ensure independence
+            # Initialize fresh model and optimizer for this fold
             model = self._build_model()
-
-            # Configure optimizer with SGD, momentum and weight decay for regularization
             optimizer = torch.optim.SGD(
                 model.parameters(),
                 lr=learning_rate,
-                momentum=0.9,  # Momentum helps escape local minima and accelerates convergence
-                weight_decay=0.0005  # L2 regularization to prevent overfitting
+                momentum=self.config.momentum,
+                weight_decay=self.config.weight_decay
             )
 
-            # Setup for training loop with early stopping
-            best_val_loss = float('inf')  # Track best loss within this fold
-            best_model_state = None  # Save best model state within this fold
-            epochs_no_improve = 0  # Counter for early stopping
-            epoch_times = []  # List to store execution times for time estimation
+            # Training variables for this fold
+            best_val_loss = float('inf')
+            best_model_state = None
+            epochs_no_improve = 0
 
-            # Main training loop - iterate through epochs
+            # Epoch training loop
             for epoch in range(num_epochs):
-                # Start timing this epoch
                 epoch_start_time = time.time()
 
-                # Train for one epoch and evaluate on validation set
+                # Train one epoch and evaluate
                 train_loss = self._train_one_epoch(model, optimizer, train_loader)
-                val_loss = self._evaluate(model, val_loader)
+                val_loss = self._evaluate_model(model, val_loader)
 
-                # Calculate time taken for this epoch
-                epoch_end_time = time.time()
-                epoch_duration = epoch_end_time - epoch_start_time
-                epoch_times.append(epoch_duration)
-                current_total_time, estimated_total_remaining, avg_time_per_epoch = (
-                    self._calculate_training_progress(total_start_time, k_folds, fold, num_epochs, epoch)
+                # Calculate progress and time estimates
+                current_time, estimated_remaining, avg_time = self._calculate_time_estimates(
+                    total_start_time, k_folds, fold, num_epochs, epoch
                 )
 
-                # Print current epoch stats and global time estimates
                 print(f"Epoch [{epoch + 1}/{num_epochs}] "
                       f"Train Loss: {train_loss:.4f} Val Loss: {val_loss:.4f} | "
-                      f"Time: {timedelta(seconds=int(current_total_time))}<"
-                      f"{timedelta(seconds=int(estimated_total_remaining))}, "
-                      f"{timedelta(seconds=int(avg_time_per_epoch))}/Epoch")
+                      f"Time: {timedelta(seconds=int(current_time))}<"
+                      f"{timedelta(seconds=int(estimated_remaining))}, "
+                      f"{timedelta(seconds=int(avg_time))}/Epoch")
 
-                # Check for improvement in validation loss
+                # Check for improvement and update best model
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
-                    # Deep copy to ensure we save the exact state without reference issues
                     best_model_state = copy.deepcopy(model.state_dict())
-                    epochs_no_improve = 0  # Reset early stopping counter
+                    epochs_no_improve = 0
                 else:
-                    epochs_no_improve += 1  # Increment early stopping counter
+                    epochs_no_improve += 1
 
-                # Early stopping check
+                # Early stopping if no improvement
                 if epochs_no_improve >= patience:
                     print(f"Early stopping after {epochs_no_improve} epochs without improvement")
-                    break  # Exit the epoch loop
+                    break
 
-            # Calculate and print fold timing information
-            fold_duration = time.time() - fold_start_time
-            print(f"Fold {fold + 1} completed in {timedelta(seconds=int(fold_duration))}")
-
-            # Update best model across all folds if this fold performed better
+            # Update overall best model across all folds
             if best_val_loss < best_val_loss_overall:
                 best_val_loss_overall = best_val_loss
                 best_model_state_overall = best_model_state
                 print(f"New best model with validation loss: {best_val_loss_overall:.4f}")
 
-        # Calculate and print total training time across all folds
-        total_duration = time.time() - total_start_time
-        print(f"\nTraining complete in {timedelta(seconds=int(total_duration))}")
-
-        # Save the best model from all folds
+        # Save the best model found across all folds
         if best_model_state_overall:
-            # Save the model state dictionary to the predefined path
             torch.save(best_model_state_overall, self.model_file)
-            print(f"Best model saved with validation loss: {best_val_loss_overall:.4f}")
-            print(f"Model saved to {self.model_file}")
+            print(f"\nBest model saved with validation loss: {best_val_loss_overall:.4f}")
+            print(f"Training completed in {timedelta(seconds=int(time.time() - total_start_time))}")
 
-    def predict(self, confidence_threshold=0.0):
+    def predict(self):
         """
-        Run inference on images, save detections to file and postprocess the results.
+        Run combined prediction approach using multiple detection strategies.
 
-        This method loads a trained model, processes all images in the dataset directory,
-        generates bounding box predictions, and saves them to a detection file in the
-        required format for evaluation.
+        This method implements a sophisticated inference pipeline that combines:
+        1. Multi-scale detection: Runs inference at different image scales
+        2. Sliding window detection: Processes large images in overlapping windows
+        3. Intelligent overlap removal: Combines results with priority rules
 
-        Args:
-            confidence_threshold (float): Minimum confidence score for detections to be included
-                                         in the output. Higher values result in fewer but more
-                                         confident detections. Default is 0.0 (include all).
-
-        Returns:
-            None: Results are saved to the detection file specified in the self.detections_files
-
-        Raises:
-            FileNotFoundError: If no trained model is found, this method suggests
-                              training a model first.
+        The combination approach provides better detection coverage and accuracy
+        compared to using either method alone. Multi-scale detection is better
+        for objects at different scales, while sliding window handles very large
+        images and provides more fine-grained detection.
         """
-        print(f"\nStarting prediction with {confidence_threshold} confidence threshold")
-        try:
-            # Attempt to load the trained model
-            model = self._load_model()
-        except FileNotFoundError as e:
-            print(e)
-            print("Please train a model first or provide a pre-trained model.")
-            return
+        confidence_threshold = self.config.confidence_threshold
 
-        print(f"Running detection model on images in {self.images_dir}")
-        # Set model to evaluation mode (disables dropout, etc.)
-        model.eval()
+        print("\n=== INFERENCE PHASE ===")
+        print("Starting combined prediction with intelligent overlap removal...")
 
-        # Create a dataset for inference (no annotations needed)
-        transformed_dataset = IcebergDataset(
-            image_dir=self.images_dir,
-            image_format=self.image_format,
-            transforms=self._get_transform()
-        )
+        # Load the trained model
+        self._load_model()
+        self.model.eval()
 
-        # Create dataloader for inference with batch size 1
-        dataloader = DataLoader(
-            transformed_dataset, batch_size=1, shuffle=False,
-            num_workers=4, collate_fn=lambda x: tuple(zip(*x))
-        )
+        # Get list of images to process
+        image_files = [f for f in os.listdir(self.image_dir) if f.endswith(self.image_format)]
+        all_detections = []
+        total_start_time = time.time()
 
-        # Create progress bar for tracking
-        progress_bar = tqdm(
-            enumerate(dataloader),
-            desc="Predict icebergs",
-            total=len(dataloader),
-            unit="image",
-            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
-        )
+        # Process each image
+        for img_file in image_files:
+            img_path = os.path.join(self.image_dir, img_file)
+            img_name = os.path.splitext(img_file)[0]
 
-        # Prepare detection output file in the required format
-        with open(self.detections_file, 'w') as det_file:
-            for i, (images, targets) in progress_bar:
-                # Get the single image and target from batch
-                image = images[0].to(self.device)
-                target = targets[0]
-                img_name = target["file_name"]
+            print(f"Processing {img_name}...")
 
-                # Update progress bar description with current file
-                progress_bar.set_description(f"Processing {img_name}")
+            # Run both detection methods
+            multi_scale_dets = self._run_multi_scale_prediction(img_path, confidence_threshold)
+            sliding_window_dets = self._run_sliding_window_prediction(img_path, confidence_threshold)
 
-                # Perform inference without gradient calculation
-                with torch.no_grad():
-                    prediction = model([image])
+            print(f"  Multi-scale: {len(multi_scale_dets)}, Sliding window: {len(sliding_window_dets)}")
 
-                # Extract predictions
-                boxes = prediction[0]['boxes'].cpu().numpy()
-                scores = prediction[0]['scores'].cpu().numpy()
+            # Intelligently combine and remove overlapping detections
+            final_detections = self._remove_overlaps(
+                multi_scale_dets, sliding_window_dets, self.config.iou_threshold
+            )
 
-                # Frame ID is the image name without leading zeros (per format requirements)
-                frame_id = img_name.lstrip('0')
-                object_id = 1  # Initial object ID for each image
+            print(f"  Final: {len(final_detections)} detections")
 
-                # Process each detection and write to file if confidence exceeds threshold
-                for box, score in zip(boxes, scores):
-                    if score > confidence_threshold:
-                        # Extract box coordinates
-                        xmin, ymin, xmax, ymax = box
-                        # Convert to width and height format
-                        width, height = xmax - xmin, ymax - ymin
-                        # Placeholder values for 3D coordinates (not used)
-                        x, y, z = -1, -1, -1
+            # Add metadata to each detection
+            for i, det in enumerate(final_detections):
+                det['image'] = img_name
+                det['object_id'] = i + 1
+                all_detections.append(det)
 
-                        # Write detection in required format:
-                        # frame_id, object_id, x, y, width, height, score, x_3d, y_3d, z_3d
-                        det_file.write(
-                            f"{frame_id},{object_id},{xmin},{ymin},{width},{height},{score},{x},{y},{z}\n"
-                        )
-                        object_id += 1  # Increment object ID for next detection
+        # Save all detections to file
+        self._save_detections(all_detections)
+        print(f"\nDetected {len(all_detections)} detections across {len(image_files)} images")
+        print(f"Inference completed in {timedelta(seconds=int(time.time() - total_start_time))}")
 
-        print(f"Detections saved to {self.detections_file}")
-        print(f"\nStarting postprocessing {self.detections_file}")
-        self.postprocess()
+        # Run postprocessing if enabled
+        if self.config.postprocess:
+            self.postprocess()
+
+        print(f"Combined detections saved to {self.detections_file}")
+        print("\n=== COMPLETED ===")
 
     def postprocess(self):
         """
-        Performs postprocessing on detection results.
+        Perform postprocessing on detections to filter false positives.
 
-        This method handles the final processing steps after object detection:
-        1. Removes masked (filtered out) detections
-        2. Merges tiled detections if tiling was used during preprocessing
-        3. Sort all detections by image name
+        This method applies several filtering strategies:
+        1. Edge filtering: Remove detections too close to image edges
+        2. Mask filtering: Remove detections in masked (invalid) regions
+        3. Size filtering: Remove detections that are too small/large
+        4. Feature extraction: Generate embeddings for remaining detections
+
+        The postprocessing significantly reduces false positives while preserving
+        valid iceberg detections, improving overall system precision.
         """
-        # Remove detections that were marked for filtering
-        self._remove_masked_detections()
+        print("\n=== POSTPROCESSING ===")
+        if not self.config.postprocess:
+            print("No postprocessing")
+            return
 
-        # If images were processed as tiles, merge the detections back to original image coordinates
-        if self.tile:
-            self._merge_tiles()
-            self._sort(self.detections_file_merged)
+        # Load mask and get image dimensions
+        if self.masking:
+            if not os.path.exists(self.mask_file):
+                raise FileNotFoundError(f"Mask file not found: {self.mask_file}")
+            else:
+                # Load binary mask
+                mask = cv2.imread(self.mask_file, cv2.IMREAD_GRAYSCALE)
+                mask = mask.astype(bool)
+                image_height, image_width = mask.shape
         else:
-            self._sort(self.detections_file)
+            mask = None
+            # Get image dimensions from a sample image
+            random_image_file = [f for f in os.listdir(self.image_dir) if f.endswith(self.image_format)][0]
+            random_image_file = os.path.join(self.image_dir, random_image_file)
+            image_height, image_width = cv2.imread(random_image_file, cv2.IMREAD_GRAYSCALE).shape
 
-        print("Finished postprocessing")
+        # Filter detections based on various criteria
+        filtered_detections = []
+        total_start_time = time.time()
 
-    def _get_transform(self):
+        with open(self.detections_file, "r") as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) >= 6:
+                    frame, id_, left, top, width, height = parts[:6]
+                    conf = float (parts[6] if len(parts) > 6 else "1.0")
+
+                    left, top, width, height = float(left), float(top), float(width), float(height)
+
+                    # Apply filtering conditions
+                    if (not self._touches_edge(left, top, width, height, image_width, image_height) and
+                            not self._box_touches_mask(left, top, width, height, mask)) and conf >= self.config.confidence_threshold:
+                        filtered_detections.append(line)
+
+        # Write filtered detections back to file
+        with open(self.detections_file, "w") as f:
+            for line in filtered_detections:
+                f.write(line)
+
+        # Sort detections file for consistent output
+        sort_file(self.detections_file)
+
+        print(f"\nReduced detection across all images to {len(filtered_detections)} detections")
+
+        # Extract features from filtered detections if enabled
+        if self.config.feature_extraction:
+            config = IcebergEmbeddingsConfig(dataset=self.dataset, image_format=self.image_format)
+            trainer = IcebergEmbeddingsTrainer(config)
+            trainer.generate_iceberg_embeddings(self.detections_file, self.embeddings_path)
+
+        print(f"Postprocessing completed in {timedelta(seconds=int(time.time() - total_start_time))}")
+
+    def _apply_masking(self, output_dir):
         """
-        Get image transformation function for preprocessing input images.
+        Apply masking to images by setting masked pixels to black.
 
-        This method defines the transformations applied to each image before
-        feeding it to the model. Currently, it only converts the image to a
-        PyTorch tensor and normalizes pixel values to [0,1].
+        Args:
+            output_dir (str): Directory to save masked images
 
-        Returns:
-            function: A callable transformation function that takes an image
-                     and returns the transformed version.
+        This method loads a binary mask and applies it to all images in the dataset.
+        Masked regions (typically land areas in satellite imagery) are set to black
+        to focus detection on valid regions (water areas where icebergs can exist).
         """
+        if not os.path.exists(self.mask_file):
+            raise FileNotFoundError(f"Mask file not found: {self.mask_file}")
 
-        def transform(image):
-            # Convert PIL image or numpy.ndarray to tensor and normalize to [0,1]
-            image = F.to_tensor(image)
-            return image
+        # Load mask image and convert to binary array
+        mask_img = Image.open(self.mask_file).convert("RGB")
+        mask_array = np.array(mask_img)
+        # Create binary mask where black pixels are True
+        mask = np.all(mask_array == [0, 0, 0], axis=-1)
 
-        return transform
+        # Process all images in the dataset
+        image_files = [f for f in os.listdir(self.image_dir) if f.endswith(self.image_format)]
+
+        for img_name in image_files:
+            img_path = os.path.join(self.image_dir, img_name)
+            img = Image.open(img_path)
+            img_array = np.array(img)
+
+            # Apply mask by setting masked pixels to black
+            masked_img = img_array.copy()
+            masked_img[mask] = [0, 0, 0]
+
+            # Save masked image
+            masked_img = Image.fromarray(masked_img)
+            masked_img.save(os.path.join(output_dir, img_name))
+
+    # ================================
+    # MODEL BUILDING METHODS
+    # ================================
 
     def _build_model(self):
         """
-        Create and return the Faster R-CNN model architecture.
+        Build enhanced Faster R-CNN model with custom configuration.
 
-        This method initializes a Faster R-CNN model with ResNet50 backbone and
-        Feature Pyramid Network (FPN). It adapts the pretrained model for our
-        specific number of classes by replacing the box predictor head.
+        Creates a Faster R-CNN model with ResNet-50 FPN backbone, customized
+        anchor generation, and proper class head for iceberg detection.
 
         Returns:
-            torch.nn.Module: Configured Faster R-CNN model moved to the appropriate device.
+            torch.nn.Module: Configured Faster R-CNN model ready for training
+
+        The model architecture includes:
+        - ResNet-50 Feature Pyramid Network (FPN) backbone
+        - Custom anchor generator with multiple scales and aspect ratios
+        - Region Proposal Network (RPN) for object proposals
+        - ROI head with classification and bounding box regression
         """
-        # Initialize with pretrained weights for feature extraction
-        model = fasterrcnn_resnet50_fpn(weights='FasterRCNN_ResNet50_FPN_Weights.DEFAULT')
+        # Create custom anchor generator with specified sizes and aspect ratios
+        anchor_generator = AnchorGenerator(
+            sizes=self.config.anchor_sizes,
+            aspect_ratios=self.config.anchor_aspect_ratios
+        )
 
-        # Get the number of input features for the classifier
+        # Build Faster R-CNN model with custom parameters
+        model = fasterrcnn_resnet50_fpn(
+            weights=None,  # Start without pretrained weights (loaded separately)
+            rpn_anchor_generator=anchor_generator,
+            box_detections_per_img=self.config.box_detections_per_img,
+            box_nms_thresh=self.config.box_nms_thresh,
+            rpn_nms_thresh=self.config.rpn_nms_thresh,
+            rpn_score_thresh=self.config.rpn_score_thresh,
+        )
+
+        # Load compatible pretrained weights for faster convergence
+        self._load_pretrained_weights(model)
+
+        # Replace classifier head for our specific number of classes
         in_features = model.roi_heads.box_predictor.cls_score.in_features
+        model.roi_heads.box_predictor = FastRCNNPredictor(in_features, self.config.num_classes)
 
-        # Replace the pre-trained head with a new one for our specific number of classes
-        model.roi_heads.box_predictor = FastRCNNPredictor(in_features, self.num_classes)
-
-        # Move model to the specified device (CPU or GPU)
         return model.to(self.device)
+
+    def _load_pretrained_weights(self, model):
+        """
+        Load compatible pretrained weights while skipping incompatible layers.
+
+        Args:
+            model (torch.nn.Module): Model to load weights into
+
+        This method carefully loads pretrained ImageNet weights while avoiding
+        shape mismatches that can occur with custom anchor configurations or
+        different number of classes. Only compatible layers are loaded.
+        """
+        pretrained_dict = FasterRCNN_ResNet50_FPN_Weights.DEFAULT.get_state_dict()
+        model_dict = model.state_dict()
+
+        # Filter out keys with shape mismatches
+        pretrained_dict = {
+            k: v for k, v in pretrained_dict.items()
+            if k in model_dict and model_dict[k].shape == v.shape
+        }
+
+        # Update model dictionary and load filtered weights
+        model_dict.update(pretrained_dict)
+        model.load_state_dict(model_dict)
 
     def _load_model(self):
         """
-        Load a previously trained model for inference.
-
-        This method checks if a model instance exists, creates one if needed,
-        and loads the trained weights from disk. It then puts the model in
-        evaluation mode for inference.
+        Load trained model from saved weights file.
 
         Returns:
-            torch.nn.Module: The loaded model ready for inference.
+            torch.nn.Module: Loaded model in evaluation mode
 
         Raises:
-            FileNotFoundError: If no model file exists at the specified path.
+            FileNotFoundError: If no trained model file exists
+
+        This method loads a previously trained model for inference. It builds
+        the model architecture and loads the saved state dict.
         """
-        # Initialize model if not already done
         if self.model is None:
             self.model = self._build_model()
 
-        # Check if model file exists and load weights
         if os.path.exists(self.model_file):
-            # Load the saved state dictionary, handling device mapping
             self.model.load_state_dict(torch.load(self.model_file, map_location=self.device))
-            # Set model to evaluation mode
             self.model.eval()
             print(f"Model loaded from {self.model_file}")
         else:
@@ -522,411 +819,610 @@ class IcebergDetector:
 
         return self.model
 
-    def _train_one_epoch(self, model, optimizer, data_loader):
+    # ================================
+    # TRAINING METHODS
+    # ================================
+
+    def _get_transforms(self):
         """
-        Train the model for one complete epoch.
-
-        This method runs one training epoch, processing all batches in the data loader.
-        For each batch, it computes the forward pass, calculates losses, and updates
-        model parameters through backpropagation.
-
-        Args:
-            model (torch.nn.Module): The model to train.
-            optimizer (torch.optim.Optimizer): The optimizer for parameter updates.
-            data_loader (torch.utils.data.DataLoader): DataLoader providing training batches.
+        Get image transforms for training/inference.
 
         Returns:
-            float: Average loss value for the epoch.
+            callable: Transform function that converts images to tensors
+
+        Creates a transform function that handles both PIL Images and numpy arrays,
+        converting them to PyTorch tensors with proper normalization (0-1 range).
         """
-        # Set model to training mode (enables dropout, batch norm updates, etc.)
-        model.train()
+
+        def transform(image):
+            if isinstance(image, Image.Image):
+                # Convert PIL Image to tensor
+                image = transforms.functional.to_tensor(image)
+            elif isinstance(image, np.ndarray):
+                # Convert numpy array to tensor and normalize
+                image = torch.from_numpy(image).permute(2, 0, 1).float() / 255.0
+            return image
+
+        return transform
+
+    def _train_one_epoch(self, model, optimizer, data_loader):
+        """
+        Train model for one epoch.
+
+        Args:
+            model (torch.nn.Module): Model to train
+            optimizer (torch.optim.Optimizer): Optimizer for parameter updates
+            data_loader (DataLoader): Training data loader
+
+        Returns:
+            float: Average training loss for the epoch
+
+        Performs one complete pass through the training data, computing losses
+        and updating model parameters via backpropagation.
+        """
+        model.train()  # Set model to training mode
         running_loss = 0.0
 
-        # Iterate through all batches in the data loader
-        for i, (images, targets) in enumerate(data_loader):
-            # Move images and targets to the appropriate device
-            images = list(image.to(self.device) for image in images)
-            # Filter out non-tensor elements like 'file_name' and move tensors to device
+        for images, targets in data_loader:
+            # Move data to device
+            images = [img.to(self.device) for img in images]
             targets = [{k: v.to(self.device) for k, v in t.items() if k != 'file_name'} for t in targets]
 
-            # Forward pass: compute predictions and losses
-            # Faster R-CNN returns a dict of losses when targets are provided
+            # Forward pass - model returns loss dict in training mode
             loss_dict = model(images, targets)
-            # Sum all individual losses (classification, regression, etc.)
             losses = sum(loss for loss in loss_dict.values())
 
             # Backward pass and optimization
-            optimizer.zero_grad()  # Clear previous gradients
-            losses.backward()  # Compute gradients
-            optimizer.step()  # Update model parameters
+            optimizer.zero_grad()
+            losses.backward()
+            optimizer.step()
 
-            # Accumulate batch loss
             running_loss += losses.item()
 
-        # Return average loss over all batches
         return running_loss / len(data_loader)
 
-    def _calculate_training_progress(self, total_start_time, k_folds, fold, num_epochs, epoch):
+    def _evaluate_model(self, model, data_loader):
         """
-        Calculate global training progress and time estimation metrics across all folds.
-
-        This method computes the current runtime, estimates the remaining time, and
-        calculates the average epoch execution time based on the overall training progress.
-        These metrics provide a global perspective on training status rather than fold-specific
-        information.
+        Evaluate model on validation data.
 
         Args:
-            total_start_time (float): Unix timestamp when the entire training process started
-            k_folds (int): Total number of folds in cross-validation
-            fold (int): Current fold index (0-based)
-            num_epochs (int): Maximum number of epochs per fold
-            epoch (int): Current epoch index within the current fold (0-based)
+            model (torch.nn.Module): Model to evaluate
+            data_loader (DataLoader): Validation data loader
 
         Returns:
-            tuple: A tuple containing:
-                - current_total_time (float): Elapsed time since training started (in seconds)
-                - estimated_total_remaining (float): Estimated time to complete all remaining epochs (in seconds)
-                - avg_time_per_epoch (float): Average time per epoch across all completed epochs (in seconds)
+            float: Average validation loss
+
+        Computes validation loss without updating model parameters.
+        Model is kept in training mode to compute losses properly.
         """
-        # Calculate elapsed time since the start of the entire training process
-        current_total_time = time.time() - total_start_time
-
-        # Calculate the total number of epochs across all folds
-        total_epochs = k_folds * num_epochs
-
-        # Calculate the global epoch number (1-based) across all folds
-        # This represents which epoch we're on if we consider all folds sequentially
-        current_epoch_global = fold * num_epochs + (epoch + 1)
-
-        # Number of epochs we've completed so far across all folds
-        epochs_completed = current_epoch_global
-
-        # Calculate the average time taken per epoch based on all epochs completed so far
-        # This provides a more stable estimate as training progresses
-        avg_time_per_epoch = current_total_time / epochs_completed
-
-        # Calculate how many epochs remain across all folds
-        remaining_epochs = total_epochs - epochs_completed
-
-        # Estimate the total time remaining for the entire training process
-        # based on average time per epoch and number of remaining epochs
-        estimated_total_remaining = remaining_epochs * avg_time_per_epoch
-
-        return current_total_time, estimated_total_remaining, avg_time_per_epoch
-
-    def _evaluate(self, model, data_loader):
-        """
-        Evaluate model performance on validation or test data.
-
-        This method computes the model's loss on the provided data without
-        updating model parameters. This is used for validation during training
-        or final evaluation.
-
-        Note: We use train mode with gradients enabled to calculate losses,
-        but don't update parameters. This ensures consistency with the loss
-        calculation during training.
-
-        Args:
-            model (torch.nn.Module): The model to evaluate.
-            data_loader (torch.utils.data.DataLoader): DataLoader providing validation batches.
-
-        Returns:
-            float: Average validation loss value.
-        """
-        # Use train mode to ensure loss calculation matches training
-        # This might seem counterintuitive but ensures loss computation uses the same settings
-        model.train()
+        model.train()  # Keep in train mode for loss calculation
         running_val_loss = 0.0
 
-        # Enable gradients for loss calculation but don't update model
-        with torch.set_grad_enabled(True):
-            # Iterate through all batches in the data loader
+        with torch.set_grad_enabled(True):  # Enable gradients for loss computation
             for images, targets in data_loader:
-                # Move images and targets to the appropriate device
-                images = list(image.to(self.device) for image in images)
-                # Filter out non-tensor elements and move tensors to device
+                # Move data to device
+                images = [img.to(self.device) for img in images]
                 targets = [{k: v.to(self.device) for k, v in t.items() if k != 'file_name'} for t in targets]
 
-                # Forward pass only to calculate losses
+                # Forward pass to get losses
                 loss_dict = model(images, targets)
-                # Sum all individual losses
                 losses = sum(loss for loss in loss_dict.values())
-                # Accumulate batch loss
                 running_val_loss += losses.item()
 
-        # Return average loss over all batches
         return running_val_loss / len(data_loader)
 
-    def _remove_masked_detections(self):
+    def _calculate_time_estimates(self, start_time, k_folds, fold, num_epochs, epoch):
         """
-        Remove detections that are primarily in masked (black) areas of the images.
-
-        This method uses parallel processing to efficiently handle large numbers of detections.
-        It checks each bounding box against the corresponding image to determine if it primarily
-        contains black pixels (mask area), and writes a new detection file without the masked detections.
-
-        Note:
-            This method creates a temporary file and then replaces the original detection file.
-        """
-        import multiprocessing as mp
-        from tqdm import tqdm
-        from concurrent.futures import ProcessPoolExecutor, as_completed
-
-        black_threshold = 0.8
-        print(f"Removing detections in masked areas (black threshold: {black_threshold})")
-
-        # Create a temporary file for filtered detections
-        temp_file = self.detections_file + ".temp"
-
-        try:
-            # First read all detections and prepare data
-            all_detections = []
-            with open(self.detections_file, 'r') as in_file:
-                for line in in_file:
-                    parts = line.strip().split(',')
-                    if len(parts) < 7:  # Ensure we have at least the essential fields
-                        all_detections.append(
-                            (line, None, None, None, None, None, self.images_dir, self.image_format, black_threshold))
-                        continue
-
-                    # Extract bounding box information
-                    frame_id = parts[0]
-                    x, y = float(parts[2]), float(parts[3])
-                    width, height = float(parts[4]), float(parts[5])
-                    all_detections.append(
-                        (line, frame_id, x, y, width, height, self.images_dir, self.image_format, black_threshold))
-
-            total_detections = len(all_detections)
-            print(f"Loaded {total_detections} detections for processing")
-
-            # Process detections in parallel
-            num_workers = min(mp.cpu_count(), 16)  # Use up to 16 workers or max CPU cores
-            results = []
-            masked_detections = 0
-
-            print(f"Processing with {num_workers} parallel workers")
-
-            # Create progress bar for tracking
-            with ProcessPoolExecutor(max_workers=num_workers) as executor:
-                # Submit all detection processing tasks
-                futures = [executor.submit(_process_masked_detection, detection_data)
-                           for detection_data in all_detections]
-
-                # Track progress with tqdm
-                with tqdm(
-                        total=total_detections,
-                        desc="Processing detections",
-                        unit="detection",
-                        bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
-                ) as progress_bar:
-                    for future in as_completed(futures):
-                        progress_bar.update(1)
-                        line, is_masked = future.result()
-                        if is_masked:
-                            masked_detections += 1
-                        else:
-                            results.append(line)
-
-            # Write filtered results to file
-            with open(temp_file, 'w') as out_file:
-                for line in results:
-                    out_file.write(line)
-
-            # Replace original file with filtered file
-            os.replace(temp_file, self.detections_file)
-
-            # Print statistics
-            print(
-                f"Removed {masked_detections} of {total_detections} detections ({masked_detections / total_detections * 100:.1f}%) in masked areas")
-
-        except Exception as e:
-            print(f"Error processing detection file: {e}")
-            # Clean up temp file if it exists
-            if os.path.exists(temp_file):
-                os.remove(temp_file)
-            raise
-
-    def _merge_tiles(self):
-        """
-        Merges detection results from image tiles back into original image coordinates.
-
-        When large images are processed as tiles (smaller segments), this method:
-        1. Adjusts bounding box coordinates based on tile positions in original image
-        2. Ensures detection IDs remain unique when merging tiles
-        3. Writes merged detections to a new output file
-
-        The method reads the original detection file line by line, transforms coordinates,
-        and writes to a merged detection file with updated values.
-        """
-        print("Merge tiles to reconstruct original images")
-
-        # Get information about how images were tiled, including overlap regions
-        tiles = get_tiles_with_overlap(self.dataset)
-
-        # Dictionary to track existing object IDs for each image to avoid duplicates
-        existing_ids = {}
-
-        # Process the detection file and create a new merged output file
-        with open(self.detections_file, "r") as infile, open(self.detections_file_merged, "w") as outfile:
-            for line in infile:
-                # Parse the CSV line into components
-                parts = line.strip().split(",")
-
-                # Skip processing if line doesn't have enough fields (likely malformed)
-                if len(parts) < 10:
-                    continue
-
-                # Extract key information from the detection line
-                image_name = parts[0]  # Image filename including tile indicator
-                tile_suffix = image_name[-1]  # The tile identifier (last character)
-                original_id = int(parts[1])  # Detection ID within the tile
-
-                # Only process if this is a recognized tile
-                if tile_suffix in tiles:
-                    # Get tile position in original image for coordinate transformation
-                    x_offset = tiles[tile_suffix]["xmin"]
-                    y_offset = tiles[tile_suffix]["ymin"]
-
-                    # Transform bounding box coordinates from tile space to original image space
-                    x = float(parts[2]) + x_offset
-                    y = float(parts[3]) + y_offset
-                    width = float(parts[4])  # Width doesn't need adjustment
-                    height = float(parts[5])  # Height doesn't need adjustment
-
-                    # Get the original image name by removing tile suffix (e.g., "_A")
-                    clean_image_name = image_name[:-2]
-
-                    # Initialize tracking for this image if not already done
-                    if clean_image_name not in existing_ids:
-                        existing_ids[clean_image_name] = set()
-
-                    # Handle ID collision - ensure unique object IDs across tiles
-                    if original_id in existing_ids[clean_image_name]:
-                        # Find the next available ID if this one is already used
-                        new_id = 1
-                        while new_id in existing_ids[clean_image_name]:
-                            new_id += 1
-                    else:
-                        # Use the original ID if no collision
-                        new_id = original_id
-
-                    # Record this ID as now used for this image
-                    existing_ids[clean_image_name].add(new_id)
-
-                    # Format and write the new merged detection entry
-                    # Format: image_name,id,x,y,width,height,confidence,class,other_fields...
-                    new_line = f"{clean_image_name},{new_id},{x},{y},{width},{height},{parts[6]},{parts[7]},{parts[8]},{parts[9]}\n"
-                    outfile.write(new_line)
-
-        print(f"Detections of the merged tiles saved to {self.detections_file_merged}")
-
-    def _sort(self, det_file):
-        """
-        Sort detection records in a file by filename and object ID.
-
-        This method reads a detection file containing comma-separated values,
-        sorts the lines first by filename and then by object ID, and writes
-        the sorted lines back to the same file.
+        Calculate training progress and time estimates.
 
         Args:
-            det_file: Path to the detection file containing comma-separated records.
-                Each line is expected to have at least two fields: filename and object ID (integer).
+            start_time (float): Training start timestamp
+            k_folds (int): Total number of folds
+            fold (int): Current fold index
+            num_epochs (int): Epochs per fold
+            epoch (int): Current epoch index
+
+        Returns:
+            tuple: (current_time, estimated_remaining, avg_time_per_epoch)
+
+        Provides useful progress information including elapsed time,
+        estimated remaining time, and average time per epoch.
         """
-        with open(det_file, 'r') as f:
-            lines = f.readlines()
+        current_time = time.time() - start_time
+        total_epochs = k_folds * num_epochs
+        current_epoch_global = fold * num_epochs + (epoch + 1)
 
-        parsed = []
-        for line in lines:
-            parts = line.strip().split(",")
-            if len(parts) >= 2:
-                filename = parts[0]
-                try:
-                    obj_id = int(parts[1])
-                except ValueError:
-                    obj_id = float('inf')  # fallback for bad data
-                parsed.append((filename, obj_id, line))
+        avg_time_per_epoch = current_time / current_epoch_global
+        remaining_epochs = total_epochs - current_epoch_global
+        estimated_remaining = remaining_epochs * avg_time_per_epoch
 
-        parsed.sort(key=lambda x: (x[0], x[1]))
-        sorted_lines = [line for _, _, line in parsed]
+        return current_time, estimated_remaining, avg_time_per_epoch
 
-        with open(det_file, "w") as f:
-            f.writelines(sorted_lines)
+    # ================================
+    # DETECTION UTILITIES
+    # ================================
 
+    def _calculate_iou(self, box1, box2):
+        """
+        Calculate Intersection over Union (IoU) between two bounding boxes.
 
-def _process_masked_detection(args):
-    """
-    Process a single detection to determine if it's in a masked area.
+        Args:
+            box1 (list): First bounding box [xmin, ymin, xmax, ymax]
+            box2 (list): Second bounding box [xmin, ymin, xmax, ymax]
 
-    Args:
-        args: Tuple containing:
-            - line: Original detection line
-            - frame_id: ID of the frame
-            - x, y, width, height: Bounding box coordinates
-            - images_dir: Directory containing images
-            - image_format: Format of image files (e.g., '.jpg')
-            - black_threshold: Threshold for determining masked detections
+        Returns:
+            float: IoU value between 0 and 1
 
-    Returns:
-        Tuple: (line, is_masked)
-    """
-    line, frame_id, x, y, width, height, images_dir, image_format, black_threshold = args
+        IoU is a standard metric for measuring bounding box overlap.
+        Higher values indicate more overlap between boxes.
+        """
+        # Find intersection coordinates
+        x1 = max(box1[0], box2[0])
+        y1 = max(box1[1], box2[1])
+        x2 = min(box1[2], box2[2])
+        y2 = min(box1[3], box2[3])
 
-    # Handle cases where we don't have valid detection data
-    if frame_id is None:
-        return line, False
+        # Check if boxes actually intersect
+        if x2 <= x1 or y2 <= y1:
+            return 0.0
 
-    # Construct image path
-    img_name = str(frame_id).zfill(6) + image_format
-    img_file = os.path.join(images_dir, img_name)
+        # Calculate intersection and union areas
+        intersection = (x2 - x1) * (y2 - y1)
+        area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+        area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
+        union = area1 + area2 - intersection
 
-    # Check if image exists
-    if not os.path.exists(img_file):
-        return line, False
+        return intersection / union if union > 0 else 0.0
 
-    # Load image (using OpenCV for efficient image processing)
-    img = cv2.imread(img_file)
-    if img is None:
-        return line, False
+    def _calculate_iou_batch(self, boxes1, boxes2):
+        """
+        Calculate IoU between sets of bounding boxes efficiently.
 
-    # Ensure coordinates are within image bounds
-    img_height, img_width = img.shape[:2]
-    x1 = max(0, int(x))
-    y1 = max(0, int(y))
-    x2 = min(img_width, int(x + width))
-    y2 = min(img_height, int(y + height))
+        Args:
+            boxes1 (np.ndarray): First set of boxes [N, 4]
+            boxes2 (np.ndarray): Second set of boxes [M, 4]
 
-    # Skip invalid bounding boxes
-    if x1 >= x2 or y1 >= y2:
-        return line, False
+        Returns:
+            np.ndarray: IoU matrix [N, M]
 
-    # Extract bounding box region
-    bbox_region = img[y1:y2, x1:x2]
+        Vectorized implementation for computing IoU between all pairs
+        of boxes in two sets. Much faster than nested loops.
+        """
+        if len(boxes1) == 0 or len(boxes2) == 0:
+            return np.array([]).reshape(len(boxes1), len(boxes2))
 
-    # Count black pixels ([0,0,0]) in the bounding box
-    black_pixel_threshold = 10  # Tolerance for nearly black pixels
-    black_pixels = np.sum(np.all(bbox_region < black_pixel_threshold, axis=2))
-    total_pixels = bbox_region.shape[0] * bbox_region.shape[1]
+        # Expand dimensions for broadcasting
+        boxes1 = np.expand_dims(boxes1, axis=1)
+        boxes2 = np.expand_dims(boxes2, axis=0)
 
-    # Calculate ratio of black pixels
-    black_ratio = black_pixels / total_pixels if total_pixels > 0 else 0
+        # Calculate intersection coordinates
+        x1 = np.maximum(boxes1[..., 0], boxes2[..., 0])
+        y1 = np.maximum(boxes1[..., 1], boxes2[..., 1])
+        x2 = np.minimum(boxes1[..., 2], boxes2[..., 2])
+        y2 = np.minimum(boxes1[..., 3], boxes2[..., 3])
 
-    # If black ratio is above threshold, mark for removal
-    return line, black_ratio >= black_threshold
+        # Calculate intersection and union areas
+        intersection = np.maximum(0, x2 - x1) * np.maximum(0, y2 - y1)
+        area1 = (boxes1[..., 2] - boxes1[..., 0]) * (boxes1[..., 3] - boxes1[..., 1])
+        area2 = (boxes2[..., 2] - boxes2[..., 0]) * (boxes2[..., 3] - boxes2[..., 1])
+        union = area1 + area2 - intersection
+
+        return intersection / (union + 1e-6)
+
+    def _calculate_containment_batch(self, boxes1, boxes2):
+        """
+        Calculate containment ratio between sets of bounding boxes.
+
+        Args:
+            boxes1 (np.ndarray): First set of boxes [N, 4]
+            boxes2 (np.ndarray): Second set of boxes [M, 4]
+
+        Returns:
+            np.ndarray: Containment matrix [N, M]
+
+        Containment measures how much of boxes1 is contained within boxes2.
+        Useful for detecting when smaller boxes are inside larger ones.
+        """
+        if len(boxes1) == 0 or len(boxes2) == 0:
+            return np.array([]).reshape(len(boxes1), len(boxes2))
+
+        # Expand dimensions for broadcasting
+        boxes1 = np.expand_dims(boxes1, axis=1)
+        boxes2 = np.expand_dims(boxes2, axis=0)
+
+        # Calculate intersection coordinates
+        x1 = np.maximum(boxes1[..., 0], boxes2[..., 0])
+        y1 = np.maximum(boxes1[..., 1], boxes2[..., 1])
+        x2 = np.minimum(boxes1[..., 2], boxes2[..., 2])
+        y2 = np.minimum(boxes1[..., 3], boxes2[..., 3])
+
+        # Calculate containment ratio
+        intersection = np.maximum(0, x2 - x1) * np.maximum(0, y2 - y1)
+        area1 = (boxes1[..., 2] - boxes1[..., 0]) * (boxes1[..., 3] - boxes1[..., 1])
+
+        return intersection / (area1 + 1e-6)
+
+    def _nms(self, detections, iou_threshold=0.5):
+        """
+        Apply Non-Maximum Suppression to remove duplicate detections.
+
+        Args:
+            detections (list): List of detection dictionaries with 'box' and 'score'
+            iou_threshold (float): IoU threshold for suppression
+
+        Returns:
+            list: Filtered detections after NMS
+
+        NMS removes redundant detections by keeping only the highest-scoring
+        detection in each group of highly overlapping detections.
+        """
+        if not detections:
+            return []
+
+        # Sort detections by confidence score (highest first)
+        detections.sort(key=lambda x: x['score'], reverse=True)
+        keep = []
+
+        while detections:
+            # Keep the highest-scoring detection
+            best = detections.pop(0)
+            keep.append(best)
+
+            # Remove highly overlapping detections
+            detections = [
+                det for det in detections
+                if self._calculate_iou(best['box'], det['box']) < iou_threshold
+            ]
+
+        return keep
+
+    # ================================
+    # INFERENCE METHODS
+    # ================================
+
+    def _run_multi_scale_prediction(self, img_path, confidence_threshold):
+        """
+        Run multi-scale detection on a single image.
+
+        Args:
+            img_path (str): Path to input image
+            confidence_threshold (float): Minimum confidence for detections
+
+        Returns:
+            list: Detections in standardized format
+
+        Multi-scale detection helps find objects at different sizes by running
+        inference on the same image at multiple scales. This is particularly
+        useful for icebergs which can vary greatly in size.
+        """
+        original_img = Image.open(img_path).convert("RGB")
+        original_size = original_img.size
+        scale_detections = []
+
+        # Run detection at each configured scale
+        for scale in self.config.scales:
+            # Resize image to current scale
+            new_size = (int(original_size[0] * scale), int(original_size[1] * scale))
+            scaled_img = original_img.resize(new_size, Image.LANCZOS)
+            img_tensor = self._get_transforms()(scaled_img).unsqueeze(0).to(self.device)
+
+            # Run inference
+            with torch.no_grad():
+                predictions = self.model(img_tensor)
+
+            # Extract predictions
+            boxes = predictions[0]['boxes'].cpu().numpy()
+            scores = predictions[0]['scores'].cpu().numpy()
+
+            if len(boxes) > 0:
+                # Scale boxes back to original image size
+                boxes[:, [0, 2]] /= scale  # x coordinates
+                boxes[:, [1, 3]] /= scale  # y coordinates
+
+                # Filter by confidence and add to detections
+                for box, score in zip(boxes, scores):
+                    if score > confidence_threshold:
+                        scale_detections.append({
+                            'box': box,
+                            'score': score,
+                            'method': 'multi_scale'
+                        })
+
+        # Apply NMS to remove duplicates across scales
+        if scale_detections:
+            merged = self._nms(scale_detections, iou_threshold=0.5)
+            return self._convert_to_detection_format(merged)
+        return []
+
+    def _run_sliding_window_prediction(self, img_path, confidence_threshold):
+        """
+        Run sliding window detection on a single image.
+
+        Args:
+            img_path (str): Path to input image
+            confidence_threshold (float): Minimum confidence for detections
+
+        Returns:
+            list: Detections in standardized format
+
+        Sliding window detection processes large images by breaking them into
+        overlapping windows. This approach can find small objects that might
+        be missed when the entire image is downscaled.
+        """
+        # Load image using OpenCV for efficient processing
+        img = cv2.imread(img_path)
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        h, w = img_rgb.shape[:2]
+
+        window_detections = []
+        window_size = self.config.window_size
+        overlap = self.config.overlap
+
+        # Calculate step sizes based on overlap
+        step_x = int(window_size[0] * (1 - overlap))
+        step_y = int(window_size[1] * (1 - overlap))
+
+        # Slide window across the image
+        for y in range(0, h - window_size[1] + 1, step_y):
+            for x in range(0, w - window_size[0] + 1, step_x):
+                # Extract window
+                window = img_rgb[y:y + window_size[1], x:x + window_size[0]]
+                window_pil = Image.fromarray(window)
+                window_tensor = self._get_transforms()(window_pil).unsqueeze(0).to(self.device)
+
+                # Run inference on window
+                with torch.no_grad():
+                    predictions = self.model(window_tensor)
+
+                # Process predictions
+                boxes = predictions[0]['boxes'].cpu().numpy()
+                scores = predictions[0]['scores'].cpu().numpy()
+
+                # Convert window-relative coordinates to global coordinates
+                for box, score in zip(boxes, scores):
+                    if score > confidence_threshold:
+                        global_box = [box[0] + x, box[1] + y, box[2] + x, box[3] + y]
+                        window_detections.append({
+                            'box': global_box,
+                            'score': score,
+                            'method': 'sliding_window'
+                        })
+
+        # Apply NMS to remove duplicates from overlapping windows
+        if window_detections:
+            merged = self._nms(window_detections, iou_threshold=0.5)
+            return self._convert_to_detection_format(merged)
+        return []
+
+    def _remove_overlaps(self, multi_scale_dets, sliding_window_dets, iou_threshold):
+        """
+        Intelligently remove overlapping detections with priority rules.
+
+        Args:
+            multi_scale_dets (list): Detections from multi-scale method
+            sliding_window_dets (list): Detections from sliding window method
+            iou_threshold (float): IoU threshold for overlap detection
+
+        Returns:
+            list: Final filtered detections
+
+        This method combines detections from both approaches using intelligent
+        priority rules:
+        1. Multi-scale detections have priority over sliding window
+        2. Among sliding window detections, larger boxes win over smaller ones
+        3. Non-overlapping detections from both methods are kept
+        """
+        # Start with all multi-scale detections (they have priority)
+        final_detections = multi_scale_dets.copy()
+
+        # Convert multi-scale detections to box format for comparison
+        ms_boxes = []
+        if multi_scale_dets:
+            ms_boxes = np.array([[d['x'], d['y'], d['x'] + d['width'], d['y'] + d['height']]
+                                 for d in multi_scale_dets])
+
+        # Process each sliding window detection
+        for sw_det in sliding_window_dets:
+            sw_box = np.array([sw_det['x'], sw_det['y'],
+                               sw_det['x'] + sw_det['width'], sw_det['y'] + sw_det['height']])
+
+            should_keep = True
+
+            # Check overlap with multi-scale detections (multi-scale wins)
+            if len(ms_boxes) > 0:
+                ious = self._calculate_iou_batch(sw_box.reshape(1, -1), ms_boxes)[0]
+                if np.any(ious > iou_threshold):
+                    should_keep = False
+
+            # Check overlap with already accepted sliding window detections
+            if should_keep and len(final_detections) > len(multi_scale_dets):
+                accepted_sw_boxes = []
+                for det in final_detections[len(multi_scale_dets):]:
+                    box = np.array([det['x'], det['y'], det['x'] + det['width'], det['y'] + det['height']])
+                    accepted_sw_boxes.append(box)
+
+                if accepted_sw_boxes:
+                    accepted_sw_boxes = np.array(accepted_sw_boxes)
+                    ious = self._calculate_iou_batch(sw_box.reshape(1, -1), accepted_sw_boxes)[0]
+                    overlap_indices = np.where(ious > iou_threshold)[0]
+
+                    if len(overlap_indices) > 0:
+                        # Compare areas - larger bounding box wins
+                        sw_area = sw_det['width'] * sw_det['height']
+
+                        # Check if current detection is larger than all overlapping ones
+                        larger_than_all = True
+                        indices_to_remove = []
+
+                        for ov_idx in overlap_indices:
+                            existing_det = final_detections[len(multi_scale_dets) + ov_idx]
+                            existing_area = existing_det['width'] * existing_det['height']
+
+                            if sw_area <= existing_area:
+                                larger_than_all = False
+                                break
+                            else:
+                                indices_to_remove.append(len(multi_scale_dets) + ov_idx)
+
+                        if larger_than_all:
+                            # Remove smaller overlapping detections
+                            for idx in sorted(indices_to_remove, reverse=True):
+                                final_detections.pop(idx)
+                        else:
+                            should_keep = False
+
+            # Add detection if it passed all filters
+            if should_keep:
+                final_detections.append(sw_det)
+
+        return final_detections
+
+    def _convert_to_detection_format(self, detections):
+        """
+        Convert detections to standardized format.
+
+        Args:
+            detections (list): Raw detections with 'box' and 'score' keys
+
+        Returns:
+            list: Detections in standardized format with x, y, width, height
+
+        Converts from [xmin, ymin, xmax, ymax] box format to [x, y, width, height]
+        format used throughout the system.
+        """
+        formatted = []
+        for det in detections:
+            box = det['box']
+            xmin, ymin, xmax, ymax = box
+            formatted.append({
+                'x': xmin,
+                'y': ymin,
+                'width': xmax - xmin,
+                'height': ymax - ymin,
+                'score': det['score'],
+                'method': det.get('method', 'unknown')
+            })
+        return formatted
+
+    def _save_detections(self, detections):
+        """
+        Save detections in the required CSV format.
+
+        Args:
+            detections (list): List of detection dictionaries
+
+        Saves detections to file in the standard format:
+        image_name,object_id,x,y,width,height,confidence,-1,-1,-1
+        """
+        with open(self.detections_file, 'w') as f:
+            for det in detections:
+                f.write(f"{det['image']},{det['object_id']},{det['x']},{det['y']},"
+                        f"{det['width']},{det['height']},{det['score']},-1,-1,-1\n")
+
+    # ================================
+    # POSTPROCESSING METHODS
+    # ================================
+
+    def _touches_edge(self, left, top, width, height, image_width, image_height):
+        """
+        Check if bounding box touches image edge within tolerance.
+
+        Args:
+            left, top, width, height (float): Bounding box parameters
+            image_width, image_height (int): Image dimensions
+
+        Returns:
+            bool: True if box touches edge, False otherwise
+
+        Edge detections are often false positives caused by partial objects
+        at image boundaries. This filter removes such detections.
+        """
+        right = left + width
+        bottom = top + height
+
+        return (left <= self.config.edge_tolerance or
+                top <= self.config.edge_tolerance or
+                right >= image_width - self.config.edge_tolerance or
+                bottom >= image_height - self.config.edge_tolerance)
+
+    def _box_touches_mask(self, left, top, width, height, mask):
+        """
+        Check if bounding box significantly overlaps with masked area.
+
+        Args:
+            left, top, width, height (float): Bounding box parameters
+            mask (np.ndarray): Binary mask array (True = masked)
+
+        Returns:
+            bool: True if box overlaps significantly with mask
+
+        Uses mask ratio threshold to determine if a detection overlaps too much
+        with invalid/masked regions (like land areas in satellite imagery).
+        """
+        if mask is None:
+            return False
+
+        # Convert to integer coordinates and ensure valid bounds
+        left, top = int(round(left)), int(round(top))
+        right, bottom = int(round(left + width)), int(round(top + height))
+
+        # Clamp to image boundaries
+        h, w = mask.shape
+        left = max(0, min(left, w - 1))
+        right = max(0, min(right, w))
+        top = max(0, min(top, h - 1))
+        bottom = max(0, min(bottom, h))
+
+        # Check for valid box
+        if right <= left or bottom <= top:
+            return False
+
+        # Extract mask region for this bounding box
+        submask = mask[top:bottom, left:right]
+
+        if submask.size == 0:
+            return False
+
+        # Check if any part of the box is in masked area
+        if submask.max():  # If there are any masked pixels
+            count = np.count_nonzero(submask == 0)  # Count unmasked pixels
+            ratio = count / float(submask.size)
+            return ratio > self.config.mask_ratio_threshold
+
+        return False
 
 
 def main():
+    # Dataset configuration
+    dataset = "hill_2min_2023-08"
+    image_format = "JPG"
+
+    # Create custom configuration with desired parameters
+    config = IcebergDetectionConfig(
+        # Dataset parameters
+        dataset=dataset,
+        image_format=image_format,
+        masking=True,
+        feature_extraction=True,
+        num_workers=4,
+
+        # Training parameters
+        num_epochs=10,
+        k_folds=5,
+        patience=3,
+
+        # Inference/postprocessing parameters
+        confidence_threshold=0.1,
+    )
+
     # Create detector instance
-    dataset = "fjord_2min_2023-08"
+    detector = IcebergDetector(config=config)
 
-    detector = IcebergDetector(dataset, image_format="JPG")
+    # Phase 1: Train the model
+    detector.train()
 
-    # Train the model
-    detector.train(k_folds=5, num_epochs=10, patience=3)
-
-    # Run inference
-    detector.predict(confidence_threshold=0.0)
-
-    detector.postprocess()
+    # Phase 2: Run inference
+    detector.predict()
 
 
 if __name__ == "__main__":

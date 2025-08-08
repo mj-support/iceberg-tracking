@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=iceberg_detector
+#SBATCH --job-name=iceberg_job
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 #SBATCH --time=12:00:00
@@ -19,6 +19,5 @@ conda activate iceberg-tracking
 
 pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu126
 
-# Uncomment one (or both) of those scripts to run them
+# Run of those scripts (or both)
 #python ../embedding.py
-#python ../detection.py
