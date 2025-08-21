@@ -110,10 +110,8 @@ class Visualizer:
         print(
             f"draw_ids = {draw_ids}, draw_boxes = {draw_boxes}, draw_contours = {draw_contours}, draw_masks = {draw_masks}")
 
-        # Load iceberg data from annotation file
-        icebergs_by_frame = load_icebergs_by_frame(self.txt_file)
-        # Slice the data to process only the specified range
-        icebergs_by_frame = dict(list(icebergs_by_frame.items())[self.start_index:self.start_index + self.length])
+        # Get selected image data according to self.start_index and self.length
+        icebergs_by_frame = self._get_selection(output_type="image")
 
         # Initialize SAM predictor if contours or masks are needed
         if draw_contours or draw_masks:
@@ -153,15 +151,8 @@ class Visualizer:
         if not os.path.exists(self.output_dir):
             raise FileNotFoundError(f"{self.output_dir} does not exist. Please run annotate_icebergs() first.")
 
-        # Get list of input and output images
-        images = sorted([f for f in os.listdir(self.image_dir) if f.lower().endswith(self.image_format.lower())])
-        images = images[self.start_index:self.start_index + self.length]
-        output_images = [f for f in os.listdir(self.output_dir) if f.lower().endswith(self.image_format.lower())]
-
-        # Check that all required annotated images exist
-        for image in images:
-            if image not in output_images:
-                raise FileNotFoundError(f"Some output images are missing. Please run annotate_icebergs() first.")
+        # Get selected image data according to self.start_index and self.length
+        images = self._get_selection(output_type="video")
 
         # Get video dimensions from first image
         first_image = cv2.imread(str(os.path.join(self.output_dir, images[0])))
@@ -181,6 +172,89 @@ class Visualizer:
         video_writer.release()
         print("Finished rendering.")
         print(f"Video saved to {video_path}")
+
+    def _get_selection(self, output_type):
+        """
+        Get selected data for processing based on output type requirements.
+
+        This method handles data selection and validation for both image annotation
+        and video rendering workflows. It ensures that all required files and data
+        are available before processing begins, providing clear error messages
+        with actionable advice when dependencies are missing.
+
+        Args:
+            output_type (str): Type of output being generated. Must be either:
+                              - "image": For image annotation workflow
+                              - "video": For video rendering workflow
+
+        Returns:
+            dict or list: Return type depends on output_type:
+                - For "image": Dictionary mapping frame names (without extension)
+                  to iceberg data dictionaries from the annotation file
+                - For "video": List of image filenames (with extensions) that
+                  are ready for video compilation
+
+        Raises:
+            ValueError: If annotation data is missing for any image in the selection
+                       when output_type is "image". Includes specific advice based
+                       on annotation source.
+            FileNotFoundError: If annotated output images are missing when
+                              output_type is "video".
+        """
+        # Get sorted list of all images in the raw image directory
+        images = sorted([f for f in os.listdir(self.image_dir)
+                         if f.lower().endswith(self.image_format.lower())])
+        # Slice to get only the requested range of images
+        images = images[self.start_index:self.start_index + self.length]
+
+        if output_type == "image":
+            # Image annotation workflow: validate annotation data availability
+
+            # Load iceberg data from annotation file
+            icebergs_by_frame = load_icebergs_by_frame(self.txt_file)
+            sliced_icebergs_by_frame = {}
+
+            # Validate that annotation data exists for each selected image
+            for image in images:
+                # Remove file extension to match annotation file format
+                image_key = image.split(self.image_format)[0]
+
+                if image_key not in icebergs_by_frame:
+                    # Generate context-specific advice based on annotation source
+                    if self.annotation_source == "gt":
+                        advice = "Please provide ground truth data first."
+                    elif self.annotation_source == "detections":
+                        advice = "Please run IcebergDetector.predict() first."
+                    elif self.annotation_source == "tracking":
+                        advice = "Please run IcebergTracker.track() first."
+
+                    # Raise informative error with actionable advice
+                    raise ValueError(
+                        f"Annotation file '{self.txt_file}' is missing data for image '{image}'. "
+                        f"{advice}"
+                    )
+                else:
+                    # Add valid annotation data to the selection
+                    sliced_icebergs_by_frame[image_key] = icebergs_by_frame[image_key]
+
+            return sliced_icebergs_by_frame
+
+        elif output_type == "video":
+            # Video rendering workflow: validate annotated images availability
+
+            # Get list of available annotated output images
+            output_images = [f for f in os.listdir(self.output_dir)
+                             if f.lower().endswith(self.image_format.lower())]
+
+            # Check that all required annotated images exist
+            for image in images:
+                if image not in output_images:
+                    raise FileNotFoundError(
+                        f"Directory '{self.output_dir}' is missing image '{image}'. "
+                        "Please run Visualizer.annotate_icebergs() first.")
+
+            # Return list of image filenames ready for video compilation
+            return images
 
     def _get_sam_predictor(self):
         """
