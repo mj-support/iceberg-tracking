@@ -6,14 +6,15 @@ channels:
 dependencies:
   - python=3.12
   - pip
-  - pytorch
+  - torch
   - torchvision
   - pillow
-  - opencv
+  - opencv-python
   - scikit-image
   - matplotlib
   - tqdm
   - scikit-learn
+  - segment-anything
   - pandas
   - jupyter
   - ipykernel

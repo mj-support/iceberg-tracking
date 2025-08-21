@@ -5,7 +5,7 @@ import pandas as pd
 import torch
 import torch.nn.functional as F
 
-from utils.helpers import DATA_DIR, load_icebergs_by_frame, extract_candidates, extract_matches
+from utils.helpers import DATA_DIR, PROJECT_ROOT, load_icebergs_by_frame, extract_candidates, extract_matches
 
 
 """
@@ -65,7 +65,7 @@ class IcebergFeatureExtractor:
         # Set up file paths for different components
         self.image_dir = os.path.join(DATA_DIR, dataset, "images", "raw")
         self.gt_file = os.path.join(DATA_DIR, self.dataset, "annotations", "gt.txt")
-        self.embedding_model_path = os.path.join(DATA_DIR, self.dataset, "models", "embedding_model.pth")
+        self.embedding_model_path = os.path.join(PROJECT_ROOT, "models", "embedding_model.pth")
         self.embeddings_path = os.path.join(DATA_DIR, self.dataset, "embeddings", "gt_embeddings.pt")
         self.output_file = os.path.join(DATA_DIR, self.dataset, "annotations", "similarity_features.json")
 
@@ -478,7 +478,6 @@ def get_gt_thresholds(dataset, image_format):
     # Check if similarity features have already been computed
     if not os.path.exists(extractor.output_file):
         print("Similarity features not found. Computing features and thresholds...")
-        print("This may take some time, especially for large datasets.")
         # Run complete feature extraction pipeline to generate thresholds
         extractor.generate_similarity_features()
 

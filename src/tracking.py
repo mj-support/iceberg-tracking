@@ -47,6 +47,7 @@ class IcebergTrackingConfig:
     Attributes:
         dataset (str): Name of the dataset to process
         image_format (str): Image file format (default: "JPG")
+        seq_start_index (int): Start frame index (defaults to 0)
         seq_length_limit (int | None): Maximum number of frames to process (None for all frames) e.g. first 10
         thresholds (dict): Dictionary containing similarity thresholds for matching
         weight_appearance (float): Weight for appearance similarity in final score
@@ -60,6 +61,7 @@ class IcebergTrackingConfig:
     dataset: str
     image_format: str = "JPG"
 
+    seq_start_index: int = 0
     seq_length_limit: int | None = None
 
     # Minimum thresholds configuration - these are used to filter out poor matches
@@ -113,6 +115,8 @@ class IcebergTracker:
         self.image_dir = os.path.join(base_path, "images", "raw")
         self.detections_file = os.path.join(base_path, "detections", "det.txt")
         self.embeddings_file = os.path.join(base_path, "embeddings", "det_embeddings.pt")
+
+        os.makedirs(os.path.join(base_path, "results"), exist_ok=True)
         self.tracking_file = os.path.join(base_path, "results", "mot.txt")
 
         # Extract threshold values for easy access
@@ -131,8 +135,9 @@ class IcebergTracker:
         print("\n📄 Iceberg Tracking Configuration")
         print("-" * 40)
         print(f"Dataset:                    {self.dataset}")
+        print(f"Start frame index:          {self.config.seq_start_index}")
         print(f"Tracking sequence length:   {self.config.seq_length_limit}")
-        print(f"Device:                   {self.device}")
+        print(f"Device:                     {self.device}")
         print("\nSimilarity thresholds of tracked iceberg:")
         print(f"  Appearance:   {self.appearance_threshold:.4f}")
         print(f"  Distance:     {self.distance_threshold:.4f}")
@@ -294,7 +299,7 @@ class IcebergTracker:
 
         # Main loop: process consecutive frame pairs
         for i in progress_bar:
-            f1, f2 = frames[i], frames[i + 1]
+            f1, f2 = frames[i + self.config.seq_start_index], frames[i + self.config.seq_start_index + 1]
             progress_bar.set_description(f"Compute similarities of icebergs from {f1} and {f2}")
 
             # Get icebergs from current and next frame
@@ -482,21 +487,13 @@ def main():
     # Configuration parameters
     dataset = "hill_2min_2023-08"
     image_format = "JPG"
-    seq_length_limit = 10
-    min_iceberg_id_count = 10
-    min_iceberg_size = 0
 
     # Load dataset-specific optimal thresholds
-    thresholds = get_gt_thresholds(dataset, image_format)
+    thresholds = get_gt_thresholds("hill_2min_2023-08", image_format)
 
     # Create configuration object
     config = IcebergTrackingConfig(
-        dataset=dataset,
-        image_format=image_format,
-        seq_length_limit=seq_length_limit,
-        min_iceberg_id_count=min_iceberg_id_count,
-        min_iceberg_size=min_iceberg_size,
-        thresholds=thresholds
+        dataset, image_format, seq_length_limit=10, seq_start_index=0, min_iceberg_id_count=10, min_iceberg_size=0, thresholds=thresholds
     )
 
     # Initialize and run tracker

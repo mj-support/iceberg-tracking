@@ -19,7 +19,7 @@ from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 from typing import Tuple, List
 
 from embedding import IcebergEmbeddingsConfig, IcebergEmbeddingsTrainer
-from utils.helpers import DATA_DIR, sort_file
+from utils.helpers import DATA_DIR, PROJECT_ROOT, sort_file
 
 """
 Iceberg Detection System using Faster R-CNN
@@ -391,16 +391,16 @@ class IcebergDetector:
 
         # Create necessary output directories
         base_path = os.path.join(DATA_DIR, self.dataset)
-        os.makedirs(os.path.join(base_path, "models"), exist_ok=True)
+        os.makedirs(os.path.join(PROJECT_ROOT, "models"), exist_ok=True)
         os.makedirs(os.path.join(base_path, "detections"), exist_ok=True)
 
         # Define all file paths used throughout the pipeline
-        self.model_file = os.path.join(base_path, "models", "iceberg_detector.pth")
+        self.model_file = os.path.join(PROJECT_ROOT, "models", "iceberg_detector.pth")
         self.image_dir = os.path.join(base_path, "images", "raw")
         self.annotations_file = os.path.join(base_path, "annotations", "gt.txt")
         self.detections_file = os.path.join(base_path, "detections", "det.txt")
         self.embeddings_path = os.path.join(DATA_DIR, self.dataset, "embeddings", "det_embeddings.pt")
-        self.iceberg_embedding_model = os.path.join(base_path, "models", "embedding_model.pth")
+        self.iceberg_embedding_model = os.path.join(PROJECT_ROOT, "models", "embedding_model.pth")
 
         # Set up mask file path if masking is enabled
         if self.masking:
@@ -586,20 +586,20 @@ class IcebergDetector:
             img_path = os.path.join(self.image_dir, img_file)
             img_name = os.path.splitext(img_file)[0]
 
-            print(f"Processing {img_name}...")
+            #print(f"Processing {img_name}...")
 
             # Run both detection methods
             multi_scale_dets = self._run_multi_scale_prediction(img_path, confidence_threshold)
             sliding_window_dets = self._run_sliding_window_prediction(img_path, confidence_threshold)
 
-            print(f"  Multi-scale: {len(multi_scale_dets)}, Sliding window: {len(sliding_window_dets)}")
+            #print(f"  Multi-scale: {len(multi_scale_dets)}, Sliding window: {len(sliding_window_dets)}")
 
             # Intelligently combine and remove overlapping detections
             final_detections = self._remove_overlaps(
                 multi_scale_dets, sliding_window_dets, self.config.iou_threshold
             )
 
-            print(f"  Final: {len(final_detections)} detections")
+            #print(f"  Final: {len(final_detections)} detections")
 
             # Add metadata to each detection
             for i, det in enumerate(final_detections):
@@ -1383,13 +1383,15 @@ class IcebergDetector:
         if submask.size == 0:
             return False
 
-        # Check if any part of the box is in masked area
-        if submask.max():  # If there are any masked pixels
+        # Check if any part of the box is not in masked area
+        if submask.max():  # If there are any unmasked pixels
             count = np.count_nonzero(submask == 0)  # Count unmasked pixels
             ratio = count / float(submask.size)
+            if ratio > 0.0:
+                x = 2
             return ratio > self.config.mask_ratio_threshold
 
-        return False
+        return True
 
 
 def main():
@@ -1399,15 +1401,7 @@ def main():
 
     # Create custom configuration with desired parameters
     config = IcebergDetectionConfig(
-        dataset=dataset,
-        image_format=image_format,
-        masking=True,
-        feature_extraction=True,
-        num_workers=4,
-        num_epochs=10,
-        k_folds=5,
-        patience=3,
-        confidence_threshold=0.1,
+        dataset, image_format, masking=True, feature_extraction=True, num_workers=4, num_epochs=10, k_folds=5, patience=3, confidence_threshold=0.1
     )
 
     # Create detector instance, train the model and run inference

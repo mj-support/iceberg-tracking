@@ -17,7 +17,7 @@ from sklearn.metrics import roc_auc_score, average_precision_score
 from torch.utils.data import Dataset, DataLoader
 from typing import Dict, Callable, Optional, Any
 
-from utils.helpers import DATA_DIR, extract_candidates, extract_matches, load_icebergs_by_frame, parse_annotations
+from utils.helpers import DATA_DIR, PROJECT_ROOT, extract_candidates, extract_matches, load_icebergs_by_frame, parse_annotations
 
 
 """
@@ -912,7 +912,7 @@ class IcebergEmbeddingsTrainer:
         """Initialize the trainer with configuration and optional factories."""
         self.config = config
         self.dataset = config.dataset
-        self.model_path = os.path.join(DATA_DIR, self.dataset, "models", "embedding_model.pth")
+        self.model_path = os.path.join(PROJECT_ROOT, "models", "embedding_model.pth")
         self.annotation_file = os.path.join(DATA_DIR, self.dataset, "annotations", "gt.txt")
         self.image_dir = os.path.join(DATA_DIR, self.dataset, "images", "raw")
         self.embeddings_path = os.path.join(DATA_DIR, self.dataset, "embeddings", "gt_embeddings.pt")
@@ -923,7 +923,7 @@ class IcebergEmbeddingsTrainer:
         self.transform_factory = transform_factory or self._default_transform_factory
 
         # Create models directory if it doesn't exist
-        os.makedirs(os.path.join(DATA_DIR, self.dataset, "models"), exist_ok=True)
+        os.makedirs(os.path.join(PROJECT_ROOT, "models"), exist_ok=True)
         os.makedirs(os.path.join(DATA_DIR, self.dataset, "embeddings"), exist_ok=True)
 
         # Initialize components (will be set up later)
@@ -1421,8 +1421,6 @@ class IcebergEmbeddingsTrainer:
 
         plt.tight_layout()
         plt.show()
-
-
 
 
 def main():
