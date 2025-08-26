@@ -67,7 +67,7 @@ class IcebergFeatureExtractor:
         self.gt_file = os.path.join(DATA_DIR, self.dataset, "annotations", "gt.txt")
         self.embedding_model_path = os.path.join(PROJECT_ROOT, "models", "embedding_model.pth")
         self.embeddings_path = os.path.join(DATA_DIR, self.dataset, "embeddings", "gt_embeddings.pt")
-        self.output_file = os.path.join(DATA_DIR, self.dataset, "annotations", "similarity_features.json")
+        self.output_file = os.path.join(PROJECT_ROOT, "models", "gt_similarity_features.json")
 
         # Initialize computation device and threshold storage
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -136,7 +136,7 @@ class IcebergFeatureExtractor:
         Returns:
             dict: Dictionary containing lists of similarity values for each feature type:
                   - "appearance": Cosine similarities between embeddings
-                  - "distance": Euclidean distances between iceberg centers  
+                  - "distance": Euclidean distances between iceberg centers
                   - "size": Size similarity scores (1 - normalized size difference)
         """
         # Extract ground truth matches from annotation data
@@ -304,7 +304,7 @@ class IcebergFeatureExtractor:
 
         Creates and displays pandas DataFrames showing:
         1. Raw similarity feature statistics
-        2. Normalized similarity feature statistics  
+        2. Normalized similarity feature statistics
         3. Computed threshold values for tracking
 
         Args:
@@ -357,7 +357,7 @@ def get_appearance_similarity(features_a, features_b, device):
 
     Args:
         features_a (torch.Tensor): Feature embedding for first iceberg
-        features_b (torch.Tensor): Feature embedding for second iceberg  
+        features_b (torch.Tensor): Feature embedding for second iceberg
         device (torch.device): Device for tensor computation (CPU/CUDA)
 
     Returns:
@@ -417,7 +417,7 @@ def get_score(appearance_similarity, distance_similarity, size_similarity,
 
     Args:
         appearance_similarity (float): Appearance similarity score [0, 1]
-        distance_similarity (float): Distance similarity score [0, 1] 
+        distance_similarity (float): Distance similarity score [0, 1]
         size_similarity (float): Size similarity score [0, 1]
         appearance_weight (float, optional): Weight for appearance feature. Defaults to 1.
         distance_weight (float, optional): Weight for distance feature. Defaults to 1.
@@ -443,7 +443,7 @@ def min_max_normalize(v, v_min, v_max):
 
     Args:
         v (float): Value to normalize
-        v_min (float): Minimum value in the range  
+        v_min (float): Minimum value in the range
         v_max (float): Maximum value in the range
 
     Returns:
