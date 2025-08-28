@@ -14,8 +14,7 @@ Iceberg Feature Extraction Module
 This module provides functionality for extracting and analyzing similarity 
 features of icebergs across images frames (in ground truth data) for 
 tracking purposes. It handles statistical thresholds from ground truth data 
-in order to use them for tracking. It also handles appearance embeddings 
-using deep learning models and comprehensive feature pipeline coordination
+in order to use them for tracking.
 
 Main Components:
 - IcebergFeatureExtractor: Main orchestrator class
