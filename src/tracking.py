@@ -4,7 +4,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from tqdm import tqdm
 
-from feature_extraction import get_distance, get_size_similarity, get_appearance_similarity, min_max_normalize, \
+from utils.feature_extraction import get_distance, get_size_similarity, get_appearance_similarity, min_max_normalize, \
     get_score, get_gt_thresholds
 from utils.helpers import DATA_DIR, load_icebergs_by_frame, sort_file
 
@@ -478,10 +478,6 @@ class IcebergTracker:
         sort_file(self.tracking_file)
         print("Finished postprocessing.")
 
-
-# TODO: Implement multiple matching rounds
-# For this, remove matched icebergs from forward and backward similarities
-# to allow for better matching of remaining icebergs
 
 def main():
     # Configuration parameters
