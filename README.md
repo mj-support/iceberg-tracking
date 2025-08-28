@@ -1,11 +1,15 @@
 # Iceberg Tracking
 
-This repository provides the implementation of detecting and tracking icebergs in glacier imagery captured during field observations.
+This repository provides the implementation of detecting and tracking icebergs in timelapse images captured during field observations.
 
 
 <div align="center">
-    <img src="data/hill_2min_2023-08/videos/tracking.gif" alt="hill" width="375"/>
-    <img src="data/hill_2min_2023-08/videos/tracking_night.gif" alt="night" width="375"/>
+    <img src="examples/hill_2min_2023-08_tracking_0-9.gif" alt="hill" width="375"/>
+    <img src="examples/hill_2min_2023-08_tracking_200-209.gif" alt="night" width="375"/>
+</div>
+<div align="center">
+    <img src="examples/fjord_2min_2023-08_tracking_420-429.gif" alt="hill" width="375"/>
+    <img src="examples/fjord_2min_2023-08_tracking_0-9.gif" alt="night" width="375"/>
 </div>
 
 
@@ -28,47 +32,48 @@ conda activate iceberg-tracking
 
 ### Preparation
 
-#### Images
-- To get started, make sure your raw images are stored in: ```data/<dataset_name>/raw/```
+1. Create a directory with the name of your dataset in: ``data/``
+2. Store the images in: ``data/<dataset_name>/images/raw/``
+3. Create a ground truth dataset with annotated detections that follows the MOT format and store the file in: ``data/<dataset_name>/annotations/gt.txt``
+   - Each line represents one object instance, containing ten comma-separated values:
+     ```
+     <frame>, <id>, <bb_left>, <bb_top>, <bb_width>, <bb_height>, <conf>, <x>, <y>, <z>
+     ```
+   - For more information see [MOT Challenge](https://motchallenge.net/instructions/).
 
-#### Training data
-  - Input data with iceberg detections needs to be stored in: `data/{dataset_name}/annotations/gt.txt`
-  - This file can be generated manually (e.g., via labeling) or produced by a detection model. 
-  - It follows the MOT format where each line consists of the following 10 values based on the preprocessed images:
-    - ```<frame>, <id>, <bb_left>, <bb_top>, <bb_width>, <bb_height>, <conf>, <x>, <y>, <z>```
+For detailed preparation and usage instruction see [docs](docs/tracking-pipeline.ipynb)
 
 ## Basic Usage
 
 ```python
-from preprocessing import ImagePreprocessor 
-from detection import IcebergDetector
-from tracking import IcebergTracker
+from embedding import IcebergEmbeddingsConfig, IcebergEmbeddingsTrainer
+from detection import IcebergDetectionConfig, IcebergDetector
+from tracking import IcebergTrackingConfig, IcebergTracker
+from utils.feature_extraction import get_gt_thresholds
 from utils.visualize import Visualizer
 
+# Dataset configuration
 dataset = "hill_2min_2023-08"
 image_format = "JPG"
 
-# Run the preprocessing pipeline with optional brightening, masking and tiling
-preprocessor = ImagePreprocessor(dataset=dataset, image_format=image_format)
-preprocessor.process_images()
+# Learning and generating embeddings that capture iceberg appearance similarity
+embedding_config = IcebergEmbeddingsConfig(dataset, image_format)
+trainer = IcebergEmbeddingsTrainer(embedding_config)
+trainer.run_complete_pipeline()
 
-# Train a Faster R-CNN model to detect icebergs + run inference on glacier images
-detector = IcebergDetector(dataset=dataset, image_format=image_format)
+# Train a Faster R-CNN model to detect icebergs in timelapse images
+detection_config = IcebergDetectionConfig(dataset, image_format)
+detector = IcebergDetector(detection_config)
 detector.train()
 detector.predict()
 
-# Match and track the detected icebergs based on size, distance and intersection
-tracker = IcebergTracker(dataset=dataset, image_format=image_format)
+# Match and track the detected icebergs based on appearance and size similarity and distance
+thresholds = get_gt_thresholds(dataset, image_format)
+tracking_config = IcebergTrackingConfig(dataset, image_format, thresholds=thresholds)
+tracker = IcebergTracker(tracking_config)
 tracker.track()
 
 # Visualize the tracking results
-visualizer = Visualizer(dataset=dataset, image_format=image_format, stage="tracking")
-visualizer.render_video()
+visualizer = Visualizer(dataset, image_format, annotation_source="tracking")
+visualizer.annotate_icebergs(draw_ids=True, draw_boxes=True, draw_contours=True, draw_masks=True)
 ```
-
-## Further steps
-- calculate area covered with ice
-  - consider the shape of the iceberg and perspective, possibly work with pixel color values
-- georeferencing: integrate both perspectives
-- melange detection
-- satellite perspective
