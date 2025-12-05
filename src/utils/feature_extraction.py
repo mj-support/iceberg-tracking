@@ -561,7 +561,10 @@ def get_distance(iceberg_a, iceberg_b):
     b_x, b_y, b_w, b_h = iceberg_b['bbox']
 
     # Calculate Euclidean distance between bounding box centers
-    dist = np.linalg.norm([a_x - b_x, a_y - b_y])
+    dist = np.linalg.norm([
+        (a_x + a_w / 2) - (b_x + b_w / 2),  # x-axis difference
+        (a_y + a_h / 2) - (b_y + b_h / 2)  # y-axis difference
+    ])
     return dist
 
 
