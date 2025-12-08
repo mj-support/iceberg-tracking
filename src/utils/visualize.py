@@ -1,4 +1,5 @@
 import cv2
+import logging
 import matplotlib.pyplot as plt
 import numpy as np
 import os
@@ -7,334 +8,422 @@ import torch
 from tqdm import tqdm
 import urllib.request
 
-from utils.helpers import DATA_DIR, PROJECT_ROOT, load_icebergs_by_frame
+from utils.helpers import PROJECT_ROOT, load_icebergs_by_frame, get_sequences, get_image_ext
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(message)s',
+    force=True
+)
+logger = logging.getLogger(__name__)
 
 """
-Visualization Module
+Iceberg Tracking Visualization Module
 
-This module provides visualization functionality for iceberg tracking
-data, including annotation rendering and video generation capabilities. It supports
-multiple annotation sources (ground truth, detections, tracking results) and 
-various visualization options for analysis and presentation purposes.
+This module provides visualization capabilities for iceberg tracking data create 
+annotated images and videos for analysis, validation and presentation purposes. 
+It supports multiple annotation sources and flexible rendering options.
 
-Main Components:
-- Visualizer: Main orchestrator class for image annotation and video rendering
-- SAM integration: Advanced segmentation using Segment Anything Model
-- Multi-format annotation support: IDs, bounding boxes, contours, and masks
-- Video generation utilities for temporal sequence visualization
-
-Features:
-- Flexible annotation rendering with customizable visual elements
-- Consistent color mapping for object tracking across frames  
-- Integration with Segment Anything Model for precise segmentation
-- Progress tracking and batch processing capabilities
+Key Features:
+    1. Multi-Source Annotation Support (Ground truth, detections, tracking)
+    2. Flexible Visualization Options (bounding boxes, IDs, contours, masks)
+    3. Video Generation
+    4. Advanced Segmentation
+    5. Consistent Color Mapping
 """
+
+
+# ============================================================================
+# MAIN VISUALIZER CLASS
+# ============================================================================
 
 class Visualizer:
     """
-    A class for visualizing iceberg tracking data with various annotation options.
+    Main orchestrator for iceberg tracking visualization and video generation.
 
-    This class provides functionality to annotate images with iceberg tracking information,
-    including bounding boxes, IDs, contours, and masks. It can also render videos from
-    the annotated image sequences.
+    This class provides a complete pipeline for annotating images with iceberg
+    tracking information and generating videos from annotated sequences. It
+    supports multiple annotation sources and flexible rendering options.
+
+    The visualizer can work with three types of annotation sources:
+    1. Ground Truth: Manual annotations for training/validation
+    2. Detections: Raw detector outputs (Faster R-CNN)
+    3. Tracking: Complete tracking results (MOT algorithm)
+
+    Visualization Options:
+        - Bounding boxes: Rectangular regions around icebergs
+        - IDs: Unique identifiers for tracking continuity
+        - Contours: Precise boundaries from SAM segmentation
+        - Masks: Semi-transparent overlays showing iceberg regions
+
+    Workflow:
+        1. Initialize with dataset and configuration
+        2. Call annotate_icebergs() to process frames
+        3. Optionally call render_video() to create MP4
 
     Attributes:
-        dataset (str): Name of the dataset directory
-        image_format (str): Image file format (e.g., '.JPG')
-        annotation_source (str): Source of annotations ('gt', 'detections', or 'tracking')
-        show_images (bool): Whether to display images during processing
-        start_index (int): Starting frame index for processing
+        dataset (str): Dataset name/path
+        annotation_source (str): Source of annotations
+            - "ground_truth": Manual labels
+            - "detections": Detector outputs
+            - "tracking": Tracking results
+        show_images (bool): Display images during processing
+        start_index (int): Starting frame index
         length (int): Number of frames to process
-        image_dir (str): Path to raw images directory
-        device (str): Device for PyTorch operations ('cuda' or 'cpu')
-        txt_file (str): Path to annotation file
-        output_dir (str): Directory for saving annotated images
+        device (str): PyTorch device ('cuda' or 'cpu')
+
+    Methods:
+        annotate_icebergs(): Process frames and add annotations
+        render_video(): Compile annotated images into video
+        _get_selection(): Load and validate data
+        _get_sam_predictor(): Initialize SAM model
+        _map_icebergs(): Core annotation loop
+        _get_object_color(): Generate consistent colors
+        _segment_icebergs(): SAM segmentation
+        _export_images(): Save annotated frames
     """
 
-    def __init__(self, dataset, image_format="JPG", annotation_source="tracking",
-                 start_index=0, length=10, show_images=False):
+    def __init__(self, dataset, annotation_source="tracking", start_index=0, length=10, show_images=False):
         """
-        Initialize the Visualizer with dataset configuration.
+        Initialize the Visualizer with dataset and configuration.
+
+        Sets up paths, validates annotation source, and configures processing
+        parameters for the visualization pipeline.
 
         Args:
-            dataset (str): Name of the dataset directory
-            image_format (str, optional): Image file format. Defaults to "JPG".
-            annotation_source (str, optional): Source of annotations. Must be 'gt', 
-                'detections', or 'tracking'. Defaults to "tracking".
-            start_index (int, optional): Starting frame index. Defaults to 0.
-            length (int, optional): Number of frames to process. Defaults to 10.
-            show_images (bool, optional): Whether to display images. Defaults to False.
-
-        Raises:
-            ValueError: If annotation_source is not valid.
+            dataset (str): Dataset name/path (e.g., "columbia/ice_melange")
+            annotation_source (str): Source of annotations. Options:
+                - "ground_truth": Manual annotations
+                - "detections": Faster R-CNN detector outputs
+                - "tracking": Complete tracking results
+                Default: "tracking"
+            start_index (int): Starting frame index for processing
+                - Use to skip initial frames
+                - Default: 0 (start from beginning)
+            length (int): Number of frames to process
+                - Useful for testing or creating short clips
+                - Default: 10
+            show_images (bool): Display images during processing
+                - Uses matplotlib for display
+                - Slows down processing
+                - Useful for debugging
+                - Default: False
         """
         self.dataset = dataset
-        self.image_format = f".{image_format}"
         self.annotation_source = annotation_source
         self.show_images = show_images
         self.start_index = start_index
         self.length = length
 
-        # Set up directory paths
-        self.image_dir = os.path.join(DATA_DIR, self.dataset, "images", "raw")
+        # Determine device for SAM model (GPU if available)
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        # Configure annotation file and output directory based on source
-        if self.annotation_source == "gt":
-            self.txt_file = os.path.join(DATA_DIR, self.dataset, "annotations", "gt.txt")
-            self.output_dir = os.path.join(DATA_DIR, self.dataset, "results", "images", "gt")
-        elif self.annotation_source == "detections":
-            self.txt_file = os.path.join(DATA_DIR, self.dataset, "detections", "det.txt")
-            self.output_dir = os.path.join(DATA_DIR, self.dataset, "results", "images", "detections")
-        elif self.annotation_source == "tracking":
-            self.txt_file = os.path.join(DATA_DIR, self.dataset, "results", "mot.txt")
-            self.output_dir = os.path.join(DATA_DIR, self.dataset, "results", "images", "tracking")
-        else:
+        # Validate annotation source
+        valid_sources = ["ground_truth", "detections", "tracking"]
+        if annotation_source not in valid_sources:
             raise ValueError(
-                f"Invalid input type '{self.annotation_source}'. Must be either 'gt, 'detections' or 'tracking'")
+                f"Invalid annotation source '{annotation_source}'. "
+                f"Must be one of: {', '.join(valid_sources)}"
+            )
 
     def annotate_icebergs(self, draw_ids=False, draw_boxes=False, draw_contours=False, draw_masks=False):
         """
         Annotate iceberg images with various visualization options.
 
-        This method processes a sequence of images and adds annotations such as IDs,
-        bounding boxes, contours, and segmentation masks for tracked icebergs.
+        This is the main processing method that loads images, applies requested
+        annotations, and saves the results. It processes all sequences in the
+        dataset within the specified frame range.
+
+        Visualization Options:
+            draw_ids: Display numeric IDs above each iceberg
+            draw_boxes: Display bounding boxes around icebergs
+            draw_contours: Display precise boundaries using SAM
+            draw_masks: Display semi-transparent segmentation masks
 
         Args:
-            draw_ids (bool, optional): Draw iceberg IDs. Defaults to False.
-            draw_boxes (bool, optional): Draw bounding boxes. Defaults to False.
-            draw_contours (bool, optional): Draw contours using SAM. Defaults to False.
-            draw_masks (bool, optional): Draw segmentation masks using SAM. Defaults to False.
+            draw_ids (bool): Draw iceberg IDs as text. Default: False
+            draw_boxes (bool): Draw bounding boxes. Default: False
+            draw_contours (bool): Draw SAM-generated contours. Default: False
+            draw_masks (bool): Draw SAM-generated masks. Default: False
+
+        Performance:
+            - SAM segmentation adds significant processing time
         """
-        print("Start annotating icebergs as follows:")
-        print(
-            f"draw_ids = {draw_ids}, draw_boxes = {draw_boxes}, draw_contours = {draw_contours}, draw_masks = {draw_masks}")
+        logger.info("Starting iceberg annotation with configuration:")
+        logger.info(f"  draw_ids = {draw_ids}")
+        logger.info(f"  draw_boxes = {draw_boxes}")
+        logger.info(f"  draw_contours = {draw_contours}")
+        logger.info(f"  draw_masks = {draw_masks}")
 
-        # Get selected image data according to self.start_index and self.length
-        icebergs_by_frame = self._get_selection(output_type="image")
+        # Get all sequences in the dataset
+        sequences = get_sequences(self.dataset)
 
-        # Initialize SAM predictor if contours or masks are needed
-        if draw_contours or draw_masks:
-            sam_predictor = self._get_sam_predictor()
-        else:
-            sam_predictor = None
+        for sequence_name, paths in sequences.items():
+            logger.info(f"\n{'=' * 60}")
+            logger.info(f"Processing sequence: {sequence_name}")
+            logger.info(f"{'=' * 60}")
 
-        # Process all frames and generate annotated images
-        images = self._map_icebergs(icebergs_by_frame, draw_ids, draw_boxes, draw_contours, draw_masks, sam_predictor)
-        print("Finished annotating.")
+            # Load and validate annotation data for selected frames
+            icebergs_by_frame, image_ext = self._get_selection(output_type="image", paths=paths)
 
-        # Save the annotated images
-        self._export_images(icebergs_by_frame, images)
+            # Initialize SAM predictor if contours or masks are needed
+            if draw_contours or draw_masks:
+                sam_predictor = self._get_sam_predictor()
+            else:
+                sam_predictor = None
+
+            # Process all frames and generate annotated images
+            images = self._map_icebergs(
+                icebergs_by_frame,
+                paths,
+                image_ext,
+                draw_ids,
+                draw_boxes,
+                draw_contours,
+                draw_masks,
+                sam_predictor
+            )
+
+            logger.info("Annotation complete.")
+
+            # Save the annotated images
+            self._export_images(icebergs_by_frame, images, sequence_name, paths)
 
     def render_video(self, fps=1):
         """
-        Create a video from the annotated images.
+        Create an MP4 video from annotated images.
 
-        This method takes the annotated images and combines them into an MP4 video
-        with the specified frame rate.
-
-        Args:
-            fps (int, optional): Frames per second for the output video. Defaults to 1.
-
-        Raises:
-            FileNotFoundError: If output directory doesn't exist or images are missing.
-        """
-        print(f"Start rendering video with {fps} fps...")
-
-        # Set up video output directory and filename
-        video_dir = os.path.join(DATA_DIR, self.dataset, "results", "videos")
-        os.makedirs(video_dir, exist_ok=True)
-        video_name = f"{self.annotation_source}_{self.start_index}-{self.start_index + self.length - 1}.mp4"
-        video_path = os.path.join(video_dir, video_name)
-
-        # Verify that annotated images exist
-        if not os.path.exists(self.output_dir):
-            raise FileNotFoundError(f"{self.output_dir} does not exist. Please run annotate_icebergs() first.")
-
-        # Get selected image data according to self.start_index and self.length
-        images = self._get_selection(output_type="video")
-
-        # Get video dimensions from first image
-        first_image = cv2.imread(str(os.path.join(self.output_dir, images[0])))
-        height, width, _ = first_image.shape
-
-        # Initialize video writer
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        video_writer = cv2.VideoWriter(video_path, fourcc, fps, (width, height))
-
-        # Write each frame to the video
-        for frame_name in images:
-            image_path = os.path.join(self.output_dir, frame_name)
-            img = cv2.imread(image_path)
-            video_writer.write(img)
-
-        # Clean up and report completion
-        video_writer.release()
-        print("Finished rendering.")
-        print(f"Video saved to {video_path}")
-
-    def _get_selection(self, output_type):
-        """
-        Get selected data for processing based on output type requirements.
-
-        This method handles data selection and validation for both image annotation
-        and video rendering workflows. It ensures that all required files and data
-        are available before processing begins, providing clear error messages
-        with actionable advice when dependencies are missing.
+        Compiles the annotated images (created by annotate_icebergs) into a
+        single video file with the specified frame rate. This is useful for
+        creating timelapse visualizations or presentation materials.
 
         Args:
-            output_type (str): Type of output being generated. Must be either:
-                              - "image": For image annotation workflow
-                              - "video": For video rendering workflow
+            fps (int): Frames per second for output video
+                Default: 1
+        """
+        logger.info(f"Starting video rendering at {fps} fps...")
+
+        sequences = get_sequences(self.dataset)
+
+        for sequence_name, paths in sequences.items():
+            logger.info(f"\nProcessing sequence: {sequence_name}")
+
+            # Set up video output directory and filename
+            base_path = str(paths["images"]).split("/images")[0]
+            video_dir = os.path.join(base_path, "visualizations", "videos")
+            os.makedirs(video_dir, exist_ok=True)
+            video_name = f"{self.annotation_source}.mp4"
+            video_path = os.path.join(video_dir, video_name)
+
+            # Verify that annotated images exist
+            image_dir = os.path.join(base_path, "visualizations", self.annotation_source)
+            if not os.path.exists(image_dir):
+                raise FileNotFoundError(
+                    f"Annotated images directory not found: {image_dir}\n"
+                    f"Please run annotate_icebergs() before render_video()."
+                )
+
+            # Get list of images to include in video
+            images = self._get_selection(output_type="video", paths=paths)
+
+            # Get video dimensions from first image
+            first_image_path = os.path.join(image_dir, images[0])
+            first_image = cv2.imread(first_image_path)
+            if first_image is None:
+                raise FileNotFoundError(f"Could not read first image: {first_image_path}")
+
+            height, width, _ = first_image.shape
+            logger.info(f"Video dimensions: {width}x{height}")
+            logger.info(f"Number of frames: {len(images)}")
+
+            # Initialize video writer with MP4 codec
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            video_writer = cv2.VideoWriter(video_path, fourcc, fps, (width, height))
+
+            # Write each frame to the video with progress tracking
+            logger.info("Writing frames to video...")
+            for frame_name in tqdm(images, desc="Writing video", unit="frame"):
+                image_path = os.path.join(image_dir, frame_name)
+                img = cv2.imread(image_path)
+                if img is not None:
+                    video_writer.write(img)
+                else:
+                    logger.warning(f"Could not read frame: {frame_name}")
+
+            # Clean up and report completion
+            video_writer.release()
+            logger.info("Video rendering complete.")
+            logger.info(f"Video saved to: {video_path}")
+
+    # ========================================================================
+    # PRIVATE HELPER METHODS
+    # ========================================================================
+
+    def _get_selection(self, output_type, paths):
+        """
+        Load and validate data for the selected frame range.
+
+        This method handles data loading differently depending on whether
+        we're preparing for image annotation or video rendering. It ensures
+        all required data exists before processing begins.
+
+        Args:
+            output_type (str): Type of output being prepared
+                - "image": Preparing for annotation
+                - "video": Preparing for video compilation
+            paths (dict): Paths dictionary from get_sequences()
 
         Returns:
-            dict or list: Return type depends on output_type:
-                - For "image": Dictionary mapping frame names (without extension)
-                  to iceberg data dictionaries from the annotation file
-                - For "video": List of image filenames (with extensions) that
-                  are ready for video compilation
-
-        Raises:
-            ValueError: If annotation data is missing for any image in the selection
-                       when output_type is "image". Includes specific advice based
-                       on annotation source.
-            FileNotFoundError: If annotated output images are missing when
-                              output_type is "video".
+            For "image":
+                tuple: (icebergs_by_frame, image_ext)
+                    - icebergs_by_frame (dict): Frame name -> iceberg data
+                    - image_ext (str): Image file extension (e.g., "jpg")
+            For "video":
+                list: Filenames of annotated images
         """
-        # Get sorted list of all images in the raw image directory
-        images = sorted([f for f in os.listdir(self.image_dir)
-                         if f.lower().endswith(self.image_format.lower())])
-        # Slice to get only the requested range of images
+        # Get sorted list of all images in the directory
+        image_ext = get_image_ext(paths["images"])
+        images = [f for f in os.listdir(paths["images"]) if f.endswith(image_ext)]
+        images.sort()
+
+        # Slice to get only the requested range
         images = images[self.start_index:self.start_index + self.length]
+        logger.info(f"Selected {len(images)} frames (index {self.start_index} to {self.start_index + len(images) - 1})")
 
         if output_type == "image":
-            # Image annotation workflow: validate annotation data availability
+            # Image annotation workflow: load and validate annotation data
 
-            # Load iceberg data from annotation file
-            icebergs_by_frame = load_icebergs_by_frame(self.txt_file)
+            # Load iceberg annotations from file
+            icebergs_by_frame = load_icebergs_by_frame(paths[self.annotation_source])
             sliced_icebergs_by_frame = {}
 
-            # Validate that annotation data exists for each selected image
+            # Validate that annotation data exists for each selected frame
+            missing_count = 0
             for image in images:
                 # Remove file extension to match annotation file format
-                image_key = image.split(self.image_format)[0]
+                image_key = image.split("." + image_ext)[0]
 
                 if image_key not in icebergs_by_frame:
-                    # Generate context-specific advice based on annotation source
-                    if self.annotation_source == "gt":
-                        advice = "Please provide ground truth data first."
-                    elif self.annotation_source == "detections":
-                        advice = "Please run IcebergDetector.predict() first."
-                    elif self.annotation_source == "tracking":
-                        advice = "Please run IcebergTracker.track() first."
-
-                    # Raise informative error with actionable advice
-                    raise ValueError(
-                        f"Annotation file '{self.txt_file}' is missing data for image '{image}'. "
-                        f"{advice}"
+                    # Log warning but continue processing other frames
+                    logger.warning(
+                        f"Missing annotation data for frame '{image}' in {self.annotation_source}"
                     )
+                    missing_count += 1
                 else:
                     # Add valid annotation data to the selection
                     sliced_icebergs_by_frame[image_key] = icebergs_by_frame[image_key]
 
-            return sliced_icebergs_by_frame
+            if missing_count > 0:
+                logger.warning(f"Skipped {missing_count} frames due to missing annotations")
+
+            return sliced_icebergs_by_frame, image_ext
 
         elif output_type == "video":
-            # Video rendering workflow: validate annotated images availability
+            # Video rendering workflow: get list of annotated images
+            base_path = str(paths["images"]).split("/images")[0]
+            image_dir = os.path.join(base_path, "visualizations", self.annotation_source)
 
             # Get list of available annotated output images
-            output_images = [f for f in os.listdir(self.output_dir)
-                             if f.lower().endswith(self.image_format.lower())]
+            annotated_images = sorted([
+                f for f in os.listdir(image_dir)
+                if f.lower().endswith("jpg")
+            ])
 
-            # Check that all required annotated images exist
-            for image in images:
-                if image not in output_images:
-                    raise FileNotFoundError(
-                        f"Directory '{self.output_dir}' is missing image '{image}'. "
-                        "Please run Visualizer.annotate_icebergs() first.")
-
-            # Return list of image filenames ready for video compilation
-            return images
+            logger.info(f"Found {len(annotated_images)} annotated images")
+            return annotated_images
 
     def _get_sam_predictor(self):
         """
         Initialize and return a SAM (Segment Anything Model) predictor.
 
-        Downloads the SAM model weights if they don't exist locally, then loads
-        the model and returns a predictor instance.
+        SAM is a powerful segmentation model that can generate precise masks
+        for objects given simple prompts like bounding boxes. This method
+        handles the complete setup:
+        1. Download model weights if not present (~375MB)
+        2. Load model architecture
+        3. Move model to appropriate device (GPU/CPU)
+        4. Create predictor instance
 
         Returns:
-            SamPredictor: Configured SAM predictor for segmentation tasks
+            SamPredictor: Configured predictor ready for segmentation
         """
-        print("Loading SAM model...")
+        logger.info("Initializing SAM model...")
 
-        # Define SAM model paths and URLs
+        # Define SAM model paths and download URL
         sam_weights_filename = "sam_vit_b_01ec64.pth"
         sam_weights_dir = os.path.join(PROJECT_ROOT, "models")
         os.makedirs(sam_weights_dir, exist_ok=True)
         sam_weights_path = os.path.join(sam_weights_dir, sam_weights_filename)
         sam_weights_url = "https://dl.fbaipublicfiles.com/segment_anything/" + sam_weights_filename
 
-        # Download weights if they don't exist
+        # Download weights if they don't exist locally
         if not os.path.exists(sam_weights_path):
-            print(f"Downloading SAM weights to: {sam_weights_path} (~375MB)")
-            urllib.request.urlretrieve(sam_weights_url, sam_weights_path)
-            print("Download complete.")
+            logger.info(f"SAM weights not found. Downloading to: {sam_weights_path}")
+            logger.info(f"Download size: ~375MB (this may take a few minutes)")
+            try:
+                urllib.request.urlretrieve(sam_weights_url, sam_weights_path)
+                logger.info("Download complete.")
+            except Exception as e:
+                raise RuntimeError(f"Failed to download SAM weights: {e}")
 
         # Load and configure the SAM model
+        logger.info(f"Loading SAM model on device: {self.device}")
         sam = sam_model_registry["vit_b"](checkpoint=sam_weights_path)
         sam.to(device=self.device)
-        print("Loading complete.")
+        logger.info("SAM model loaded successfully.")
 
         return SamPredictor(sam)
 
-    def _map_icebergs(self, icebergs_by_frame, draw_ids, draw_boxes, draw_contours, draw_masks, sam_predictor=None):
+    def _map_icebergs(self, icebergs_by_frame, paths, image_ext, draw_ids, draw_boxes, draw_contours, draw_masks,
+                      sam_predictor=None):
         """
         Process all frames and add iceberg annotations to images.
 
-        This is the core processing method that iterates through all frames and
-        applies the requested annotations to each iceberg in each frame.
+        This is the core processing loop that iterates through all frames and
+        applies the requested annotations to each iceberg. It maintains consistent
+        colors across frames for tracking clarity.
 
         Args:
-            icebergs_by_frame (dict): Dictionary mapping frame names to iceberg data
+            icebergs_by_frame (dict): Frame name -> iceberg data mapping
+            paths (dict): Paths dictionary from get_sequences()
+            image_ext (str): Image file extension (e.g., "jpg")
             draw_ids (bool): Whether to draw iceberg IDs
             draw_boxes (bool): Whether to draw bounding boxes
-            draw_contours (bool): Whether to draw contours
-            draw_masks (bool): Whether to draw segmentation masks
-            sam_predictor (SamPredictor, optional): SAM predictor for segmentation
+            draw_contours (bool): Whether to draw SAM contours
+            draw_masks (bool): Whether to draw SAM masks
+            sam_predictor (SamPredictor | None): SAM predictor instance
 
         Returns:
-            list: List of annotated images as numpy arrays
-
-        Raises:
-            FileNotFoundError: If an image file cannot be found
+            list: List of annotated images as numpy arrays (BGR format)
         """
         images_with_mappings = []
         colormap = {}  # Store consistent colors for each iceberg ID
 
-        # Calculate total number of entries for progress bar
-        total_entries = sum(len(inner) for inner in icebergs_by_frame.values())
+        # Calculate total number of icebergs for progress bar
+        total_entries = sum(len(icebergs) for icebergs in icebergs_by_frame.values())
 
         # Initialize progress bar
         progress_bar = tqdm(
             total=total_entries,
-            desc="Processing entries",
-            unit="entry",
+            desc="Processing icebergs",
+            unit="iceberg",
             bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
         )
 
         # Process each frame
         for frame_name, icebergs in icebergs_by_frame.items():
-            progress_bar.set_description(f"Annotating icebergs in {frame_name}{self.image_format}")
+            progress_bar.set_description(f"Processing {frame_name}.{image_ext}")
 
-            # Load the image
-            image_path = os.path.join(self.image_dir, frame_name + self.image_format)
-            img = cv2.imread(image_path)
+            # Load the raw image
+            image_path = paths["images"] / (frame_name + "." + image_ext)
+            img = cv2.imread(str(image_path))
             if img is None:
-                raise FileNotFoundError(f"Image file not found: {img}")
+                raise FileNotFoundError(f"Image file not found: {image_path}")
 
             # Prepare SAM predictor if needed for segmentation
             if draw_contours or draw_masks:
+                # SAM expects RGB, OpenCV loads as BGR
                 outline_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                 sam_predictor.set_image(outline_img)
 
@@ -347,31 +436,61 @@ class Visualizer:
 
                 # Extract bounding box coordinates
                 x1, y1, w, h = iceberg_data['bbox']
-                x2 = x1 + w
-                y2 = y1 + h
+                x2 = x1 + w  # Right edge
+                y2 = y1 + h  # Bottom edge
 
-                # Draw iceberg ID if requested
+                # Draw iceberg ID text if requested
                 if draw_ids:
-                    cv2.putText(img, str(iceberg_id), (int(x1), max(int(y1) - 10, 20)),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+                    # Position text above bounding box (with minimum y to stay on screen)
+                    text_y = max(int(y1) - 10, 20)
+                    cv2.putText(
+                        img,
+                        str(iceberg_id),
+                        (int(x1), text_y),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,  # Font scale
+                        color,
+                        2  # Thickness
+                    )
 
                 # Draw bounding box if requested
                 if draw_boxes:
-                    cv2.rectangle(img, (int(x1), int(y1)), (int(x2), int(y2)), color, 3)
+                    cv2.rectangle(
+                        img,
+                        (int(x1), int(y1)),  # Top-left corner
+                        (int(x2), int(y2)),  # Bottom-right corner
+                        color,
+                        3  # Thickness
+                    )
 
                 # Generate and draw segmentation if requested
                 if draw_contours or draw_masks:
-                    contours, mask, score = self._segment_icebergs(sam_predictor, np.array([x1, y1, x2, y2]))
+                    # Run SAM segmentation with bounding box as prompt
+                    contours, mask, score = self._segment_icebergs(
+                        sam_predictor,
+                        np.array([x1, y1, x2, y2])
+                    )
 
-                    # Apply mask overlay if requested
+                    # Apply semi-transparent mask overlay if requested
                     if draw_masks:
-                        mask_alpha = 0.5  # Transparency level for mask overlay
-                        img[mask] = ((1 - mask_alpha) * img[mask] + mask_alpha * np.array(color)).astype(np.uint8)
+                        mask_alpha = 0.5  # 50% transparency
+                        # Blend original image with solid color using mask
+                        img[mask] = (
+                                (1 - mask_alpha) * img[mask] +
+                                mask_alpha * np.array(color)
+                        ).astype(np.uint8)
 
-                    # Draw contours if requested
+                    # Draw contour outline if requested
                     if draw_contours:
-                        cv2.drawContours(img, contours, -1, color, 2)
+                        cv2.drawContours(
+                            img,
+                            contours,
+                            -1,  # Draw all contours
+                            color,
+                            2  # Thickness
+                        )
 
+            # Collect annotated image
             images_with_mappings.append(img)
 
         progress_bar.close()
@@ -379,80 +498,121 @@ class Visualizer:
 
     def _get_object_color(self, object_id, colormap):
         """
-        Get a consistent color for an object ID.
+        Get a consistent, deterministic color for an object ID.
 
-        Uses a seeded random number generator to ensure the same object ID
-        always gets the same color across frames.
+        This method ensures that the same object ID always gets the same color
+        across all frames, making it easy to visually track objects through
+        time. Colors are generated using seeded random numbers for perfect
+        reproducibility.
 
         Args:
             object_id (int): Unique identifier for the object
-            colormap (dict): Dictionary storing ID to color mappings
+            colormap (dict): Dictionary storing ID → color mappings
 
         Returns:
-            tuple: RGB color tuple (B, G, R) for OpenCV
+            tuple: BGR color tuple (B, G, R) for OpenCV
+                - Values in range [0, 255]
+                - OpenCV uses BGR format, not RGB
         """
         if object_id not in colormap:
-            # Use object ID as seed for consistent color generation
+            # Use object ID as seed for deterministic color generation
             np.random.seed(object_id)
+            # Generate random BGR color
             color = tuple(map(int, np.random.randint(0, 255, size=3)))
+            # Cache for future use
             colormap[object_id] = color
 
         return colormap[object_id]
 
     def _segment_icebergs(self, sam_predictor, input_box):
         """
-        Generate segmentation mask and contours for an iceberg using SAM.
+        Generate precise segmentation mask and contours using SAM.
 
-        Uses the Segment Anything Model to generate a segmentation mask for
-        the iceberg within the given bounding box, then extracts contours.
+        This method uses the Segment Anything Model (SAM) to generate a precise
+        segmentation mask for an iceberg, given its bounding box as a prompt.
+        SAM can segment objects much more accurately than simple bounding boxes.
 
         Args:
             sam_predictor (SamPredictor): Configured SAM predictor
-            input_box (np.ndarray): Bounding box coordinates [x1, y1, x2, y2]
+                - Must have image set via set_image()
+            input_box (np.ndarray): Bounding box [x1, y1, x2, y2]
+                - Top-left and bottom-right corners
+                - Pixel coordinates
 
         Returns:
-            tuple: (contours, mask, score) where:
+            tuple: (contours, mask, score)
                 - contours: OpenCV contours for drawing
-                - mask: Boolean mask array
+                    - List of numpy arrays or single array
+                    - Can be passed directly to cv2.drawContours
+                - mask: Binary segmentation mask
+                    - Boolean array same size as image
+                    - True inside iceberg, False outside
                 - score: Confidence score from SAM
+                    - Float in range [0, 1]
+                    - Higher = more confident
         """
         # Run SAM prediction using bounding box as prompt
         masks, scores, logits = sam_predictor.predict(
-            point_coords=None,
-            point_labels=None,
-            box=input_box[None, :],  # Add batch dimension
-            multimask_output=False
+            point_coords=None,  # Not using point prompts
+            point_labels=None,  # Not using point prompts
+            box=input_box[None, :],  # Add batch dimension [1, 4]
+            multimask_output=False  # Return single best mask
         )
 
         # Select the best mask based on confidence score
+        # Filter to valid masks (score >= 0)
         valid_masks = scores >= 0
-        best_idx = np.argmax(scores[valid_masks])
+        if not valid_masks.any():
+            # Fallback: use first mask if none are valid
+            best_idx = 0
+        else:
+            # Select mask with highest score
+            best_idx = np.argmax(scores[valid_masks])
+
         mask = masks[valid_masks][best_idx]
         score = scores[valid_masks][best_idx]
 
-        # Convert mask to uint8 format for contour extraction
+        # Convert binary mask to uint8 format for contour extraction
         mask_uint8 = (mask * 255).astype(np.uint8)
-        contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        # Extract contours from mask
+        contours, _ = cv2.findContours(
+            mask_uint8,
+            cv2.RETR_EXTERNAL,  # Only external contours
+            cv2.CHAIN_APPROX_SIMPLE  # Compress contours
+        )
 
         # Select the largest contour if multiple are found
+        # (SAM sometimes generates small spurious regions)
         if len(contours) > 1:
-            contours = contours[0] if contours[0].shape[0] > contours[1].shape[0] else contours[1]
+            # Compare by number of points (approximation of size)
+            contours = [max(contours, key=lambda c: c.shape[0])]
 
         return contours, mask, score
 
-    def _export_images(self, icebergs_by_frame, images):
+    def _export_images(self, icebergs_by_frame, images, sequence_name, paths):
         """
         Save annotated images to the output directory.
 
-        Saves all processed images to the configured output directory and
-        optionally displays them using matplotlib.
+        This method handles the final step of the annotation pipeline: saving
+        all processed images to disk. It creates the necessary directory structure
+        and optionally displays images using matplotlib.
 
         Args:
-            icebergs_by_frame (dict): Dictionary mapping frame names to iceberg data
-            images (list): List of annotated images as numpy arrays
+            icebergs_by_frame (dict): Frame names to iceberg data
+                - Used to get frame names in correct order
+            images (list): Annotated images as numpy arrays
+                - Must match order of icebergs_by_frame
+                - BGR format (OpenCV)
+            sequence_name (str): Name of the sequence being processed
+            paths (dict): Paths dictionary from get_sequences()
         """
-        # Create output directory if it doesn't exist
-        os.makedirs(self.output_dir, exist_ok=True)
+        # Create output directory structure
+        base_path = str(paths["images"]).split("/images")[0]
+        image_dir = os.path.join(base_path, "visualizations", self.annotation_source)
+        os.makedirs(image_dir, exist_ok=True)
+
+        logger.info(f"Saving annotated images to: {image_dir}")
 
         # Save each annotated image
         for index, frame_name in enumerate(icebergs_by_frame):
@@ -462,8 +622,8 @@ class Visualizer:
             rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
             # Save the image (OpenCV uses BGR format)
-            img_name = f"{frame_name}{self.image_format}"
-            output_path = os.path.join(self.output_dir, img_name)
+            img_name = f"{frame_name}.jpg"
+            output_path = os.path.join(image_dir, img_name)
             cv2.imwrite(output_path, img)
 
             # Display image if requested
@@ -474,23 +634,4 @@ class Visualizer:
                 plt.axis('off')
                 plt.show()
 
-        print(f"Saved images in {self.output_dir}.")
-
-
-def main():
-    # Configuration parameters
-    dataset = "hill_2min_2023-08"
-    image_format = "JPG"
-
-    # Initialize visualizer with tracking data
-    visualizer = Visualizer(dataset, image_format, annotation_source="tracking", start_index=0, length=10, show_images=True)
-
-    # Generate annotated images with all visualization options enabled
-    visualizer.annotate_icebergs(draw_ids=True, draw_boxes=True, draw_contours=True, draw_masks=True)
-
-    # Create a video from the annotated images
-    visualizer.render_video(fps=1)
-
-
-if __name__ == '__main__':
-    main()
+        logger.info(f"Successfully saved {len(images)} annotated images.")
