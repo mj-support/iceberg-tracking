@@ -170,7 +170,7 @@ class IcebergEmbeddingsConfig:
     loss_alpha: float = 0.7
 
     # Device configuration
-    device: str = 'cuda'
+    device: str = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 # ============================================================================
@@ -841,11 +841,6 @@ class IcebergSequenceComparisonDataset(Dataset):
         4. Precompute and cache all iceberg crops in memory
         5. Apply transforms during training
 
-    Performance Optimization:
-        All iceberg crops are precomputed and cached in memory at initialization.
-        This trades memory for speed, avoiding repeated image loading and cropping
-        during training. For typical sequences, this provides 10-100x speedup.
-
     Attributes:
         sequence_name (str): Name of the sequence
         config (IcebergEmbeddingsConfig): Configuration object
@@ -1198,7 +1193,7 @@ class IcebergEmbeddingsTrainer:
         self.optimizer = None
         self.scheduler = None
         self.criterion = None
-        self.device = torch.device(config.device if torch.cuda.is_available() else 'cpu')
+        self.device = config.device if config.device else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
         # Training history tracking
         self.history = {
@@ -1231,13 +1226,6 @@ class IcebergEmbeddingsTrainer:
             Dict[str, Any]: Complete training history and evaluation results
                 Contains: train_losses, val_losses, val_aucs, best_auc,
                          early_stopped, final_epoch, and evaluation metrics
-
-        Raises:
-            Exception: If any stage of the pipeline fails
-
-        Error Handling:
-            All stages are wrapped in try-except for graceful error reporting.
-            The pipeline will log the error and re-raise for debugging.
         """
         logger.info("🚀 Starting Iceberg Similarity Training Pipeline")
         logger.info("=" * 60)
@@ -1613,15 +1601,6 @@ class IcebergEmbeddingsTrainer:
         - Updates learning rate schedule
         - Saves model checkpoints
         - Logs progress and time estimates
-
-        Early Stopping:
-            Training stops if validation AUC doesn't improve by min_delta
-            for patience consecutive epochs. This prevents overfitting and
-            saves computation time.
-
-        Checkpointing:
-            Only the best model (highest validation AUC) is saved to disk.
-            This ensures we keep the model with best generalization.
         """
         logger.info("\n=== TRAINING PHASE ===")
         logger.info("Starting training...")
