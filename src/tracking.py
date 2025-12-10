@@ -8,8 +8,8 @@ from filterpy.kalman import KalmanFilter
 from tqdm import tqdm
 
 from utils.feature_extraction import get_distance, get_size_similarity, get_appearance_similarity, \
-    min_max_normalize, get_score
-from utils.helpers import load_icebergs_by_frame, sort_file, get_sequences
+    min_max_normalize, get_score, get_gt_thresholds
+from utils.helpers import load_icebergs_by_frame, sort_file, get_sequences, load_config_file
 
 # Configure logging
 logging.basicConfig(
@@ -93,6 +93,8 @@ class IcebergTrackingConfig:
             - 'size': Min size similarity [0, 1]
             - 'match_score': Min combined score [0, 1]
         threshold_tolerance_factor (float): Factor make the threshold less strict*
+        get_gt_thresholds (bool): Get thresholds from ground truth data
+        gt_thresholds (str): Path to training / ground truth directory
 
         # Weight Configuration (relative importance)
         weight_appearance (float): Weight for appearance similarity
@@ -137,6 +139,8 @@ class IcebergTrackingConfig:
         "match_score": 0.50
     })
     threshold_tolerance_factor: float = 0.5
+    get_gt_thresholds: bool = True
+    gt_thresholds: str = "hill/train"
 
     # Weight configuration
     weight_appearance: float = 0.35
@@ -201,7 +205,7 @@ class IcebergTrack:
         get_uncertainty(): Get position uncertainty radius
     """
 
-    def __init__(self, initial_detection, track_id, frame_id, config):
+    def __init__(self, initial_detection, track_id, frame_id, config, distance_threshold):
         """
         Initialize a new track from an unmatched detection.
 
@@ -227,6 +231,7 @@ class IcebergTrack:
         self.history = [(frame_id, initial_detection['id'], initial_detection['bbox'], initial_detection['conf'])]
         self.last_bbox = initial_detection['bbox']
         self.last_detection = initial_detection
+        self.distance_threshold = distance_threshold
 
         # Initialize Kalman filter if enabled
         if config.use_kalman:
@@ -423,7 +428,7 @@ class IcebergTrack:
             return 2 * np.sqrt(cov_xx + cov_yy)
         else:
             # No Kalman filter - use configured distance threshold
-            return self.config.thresholds['distance']
+            return self.distance_threshold
 
 
 # ============================================================================
@@ -597,8 +602,13 @@ class IcebergTracker:
         """
         self.config = config
         self.dataset = config.dataset
-        self.device = config.device
+        self.device = config.device if config.device else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.sequences = get_sequences(self.dataset)
+        self.thresholds = config.thresholds
+        try:
+            self.thresholds = get_gt_thresholds(config.gt_thresholds) if config.get_gt_thresholds else self.thresholds
+        except:
+            logger.info(f"\nGround truth dataset {self.config.gt_thresholds} not found. Using default thresholds instead.")
 
         # Track management state
         self.tracks = []  # Currently active tracks
@@ -636,10 +646,10 @@ class IcebergTracker:
         logger.info(f"  Min track length:         {self.config.min_iceberg_id_count}")
 
         logger.info("\nSimilarity Thresholds:")
-        logger.info(f"  Appearance:               {self.config.thresholds['appearance']:.4f}")
-        logger.info(f"  Distance:                 {self.config.thresholds['distance']:.0f}px")
-        logger.info(f"  Size:                     {self.config.thresholds['size']:.4f}")
-        logger.info(f"  Match score:              {self.config.thresholds['match_score']:.4f}")
+        logger.info(f"  Appearance:               {self.thresholds['appearance']:.4f}")
+        logger.info(f"  Distance:                 {self.thresholds['distance']:.0f}px")
+        logger.info(f"  Size:                     {self.thresholds['size']:.4f}")
+        logger.info(f"  Match score:              {self.thresholds['match_score']:.4f}")
 
         logger.info("\nFeature Weights:")
         logger.info(f"  Distance:   {self.config.weight_distance:.2f}")
@@ -821,7 +831,8 @@ class IcebergTracker:
                     detection,
                     self.next_track_id,
                     frame_id,
-                    self.config
+                    self.config,
+                    distance_threshold=self.thresholds["distance"]
                 )
                 self.tracks.append(new_track)
                 self.next_track_id += 1
@@ -880,18 +891,18 @@ class IcebergTracker:
 
         # Threshold cascade: check cheap features first
         # Use relaxed thresholds (*1.5 or /1.5) for initial filtering
-        if distance <= self.config.thresholds['distance'] * (1 + self.config.threshold_tolerance_factor):
+        if distance <= self.thresholds['distance'] * (1 + self.config.threshold_tolerance_factor):
             # Size similarity (medium cost)
             size_similarity = get_size_similarity(predicted_iceberg, detection_iceberg)
 
-            if size_similarity >= self.config.thresholds['size'] / (1 + self.config.threshold_tolerance_factor):
+            if size_similarity >= self.thresholds['size'] / (1 + self.config.threshold_tolerance_factor):
                 # Appearance similarity (expensive - only compute if needed)
                 appearance_similarity = get_appearance_similarity(features_a, features_b, self.device)
 
-                if appearance_similarity >= self.config.thresholds['appearance'] / (1 + self.config.threshold_tolerance_factor):
+                if appearance_similarity >= self.thresholds['appearance'] / (1 + self.config.threshold_tolerance_factor):
                     # Normalize distance to [0, 1] (1 = close, 0 = far)
                     distance_norm = 1 - min_max_normalize(
-                        distance, 0, self.config.thresholds['distance'],
+                        distance, 0, self.thresholds['distance'],
                     )
 
                     # Compute unweighted overall score (equal weights)
@@ -902,7 +913,7 @@ class IcebergTracker:
                     )
 
                     # Check unweighted threshold
-                    if score >= self.config.thresholds['match_score'] / (1 + self.config.threshold_tolerance_factor):
+                    if score >= self.thresholds['match_score'] / (1 + self.config.threshold_tolerance_factor):
                         # Compute weighted score with configured weights
                         weighted_score = get_score(
                             appearance_similarity,
@@ -954,9 +965,9 @@ class IcebergTracker:
             # Determine search radius (adaptive if using Kalman)
             if self.config.use_kalman:
                 search_radius = track.get_uncertainty()
-                search_radius = max(search_radius, self.config.thresholds['distance'])
+                search_radius = max(search_radius, self.thresholds['distance'])
             else:
-                search_radius = self.config.thresholds['distance']
+                search_radius = self.thresholds['distance']
 
             # Get candidate detections within search radius
             if spatial_index is not None:
@@ -1061,9 +1072,9 @@ class IcebergTracker:
             # Determine search radius (adaptive if using Kalman)
             if self.config.use_kalman:
                 search_radius = track.get_uncertainty()
-                search_radius = max(search_radius, self.config.thresholds['distance'])
+                search_radius = max(search_radius, self.thresholds['distance'])
             else:
-                search_radius = self.config.thresholds['distance']
+                search_radius = self.thresholds['distance']
 
             # Get candidate detections
             if spatial_index is not None:
