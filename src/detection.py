@@ -442,7 +442,7 @@ class IcebergDetector:
         """
         self.config = config
         self.dataset = config.dataset
-        self.device = config.device
+        self.device = config.device if config.device else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.model = None
 
         # Create necessary output directories
