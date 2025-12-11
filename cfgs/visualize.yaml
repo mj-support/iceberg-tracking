@@ -1,0 +1,17 @@
+# Data configuration
+dataset: null   # Required field
+
+# General configurations
+annotation_source: tracking  # Options: tracking, detections, ground_truth
+start_index: 0
+seq_length_limit: null
+show_images: False
+
+# Annotation configuration
+draw_ids: True
+draw_boxes: True
+draw_contours: False
+draw_masks: False
+
+# Video configurations
+fps: 7

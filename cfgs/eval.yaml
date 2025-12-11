@@ -1,0 +1,5 @@
+# Data configuration
+dataset: null   # Required field
+
+# Threshold configurations
+iou_threshold: 0.5

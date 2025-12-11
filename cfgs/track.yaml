@@ -1,0 +1,38 @@
+# Data configuration
+dataset: null   # Required field
+seq_start_index: 0
+seq_length_limit: null
+
+# Algorithm configuration
+use_kalman: True
+use_spatial_index: True
+bidirectional_matching: True
+
+# Threshold configurations
+thresholds: {
+    "appearance": 0.30,
+    "distance": 100,
+    "size": 0.30,
+    "match_score": 0.50
+}
+threshold_tolerance_factor: 0.5
+get_gt_thresholds: True
+gt_thresholds: "hill/train"
+
+# Weight configuration
+weight_appearance: 0.35
+weight_size: 0.05
+weight_distance: 0.60
+
+# Track management
+max_age: 3
+min_iceberg_id_count: 2
+min_iceberg_size: 0.0
+
+# Kalman filter parameters
+process_noise: 15.0
+measurement_noise: 15.0
+kalman_distance_weight: 0.7
+
+# Device configuration
+device: null
