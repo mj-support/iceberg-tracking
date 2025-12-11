@@ -1,3 +1,8 @@
+from detection import IcebergDetector
+from embedding import IcebergEmbeddingsTrainer
+from tracking import IcebergTracker
+from utils.eval import filter_tracking_to_gt
+from utils.visualize import Visualizer
 from utils.helpers import parse_cli_args, load_config
 
 """
@@ -39,16 +44,12 @@ def main():
 
     if cmd == 'train-embedding':
         # Train Vision Transformer for appearance-based similarity
-        from embedding import IcebergEmbeddingsTrainer
-
         config = load_config(cfg_file, **overrides)
         trainer = IcebergEmbeddingsTrainer(config)
         trainer.run_complete_pipeline()
 
     elif cmd == 'train-detection':
         # Train Faster R-CNN for iceberg detection
-        from detection import IcebergDetector
-
         config = load_config(cfg_file, **overrides)
         detector = IcebergDetector(config)
         detector.train()
@@ -59,16 +60,12 @@ def main():
 
     elif cmd == 'detect':
         # Run detection on images
-        from detection import IcebergDetector
-
         config = load_config(cfg_file, **overrides)
         detector = IcebergDetector(config)
         detector.predict()
 
     elif cmd == 'track':
         # Run multi-object tracking
-        from tracking import IcebergTracker
-
         config = load_config(cfg_file, **overrides)
         tracker = IcebergTracker(config)
         tracker.track()
@@ -79,23 +76,15 @@ def main():
 
     elif cmd == 'eval':
         # Evaluate tracking against ground truth
-        from utils.eval import filter_tracking_to_gt
-
         config = load_config(cfg_file, **overrides)
         filter_tracking_to_gt(config)
 
     elif cmd == 'visualize':
         # Create annotated images and videos
-        from utils.visualize import Visualizer
-
         config = load_config(cfg_file, **overrides)
         visualizer = Visualizer(config)
-
-        # Generate annotated images
-        visualizer.annotate_icebergs()
-
-        # Uncomment to also render video
-        # visualizer.render_video()
+        visualizer.annotate_icebergs()          # Generate annotated images
+        # visualizer.render_video()             # Uncomment to also render video
 
 
 if __name__ == '__main__':
