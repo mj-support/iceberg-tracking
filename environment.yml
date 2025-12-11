@@ -4,19 +4,21 @@ channels:
   - pytorch
   - defaults
 dependencies:
-  - python=3.12
+  - python=3.13
   - pip
-  - torch
-  - torchvision
+  - pytorch=2.9.1
+  - torchvision=0.24.1
   - pillow
-  - opencv-python
+  - opencv
   - scikit-image
   - matplotlib
   - tqdm
   - scikit-learn
-  - segment-anything
   - pandas
   - jupyter
   - ipykernel
+  - omegaconf
+  - filterpy
   - pip:
+      - segment-anything
       - -e .
