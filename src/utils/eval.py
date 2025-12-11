@@ -1,5 +1,6 @@
 import pandas as pd
 import logging
+from dataclasses import dataclass
 
 from utils.helpers import sort_file, get_sequences, DATA_DIR
 
@@ -19,6 +20,49 @@ ground truth annotations. It implements bidirectional IoU-based matching to crea
 filtered tracking outputs that can be evaluated using standard MOT metrics.
 The results can be used for evaluation with TrackEval.
 """
+
+
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
+
+@dataclass
+class EvalConfig:
+    """
+    Configuration for tracking evaluation against ground truth.
+
+    This dataclass centralizes all parameters for the evaluation preparation pipeline
+    that filters tracking results to ground truth coverage using bidirectional IoU
+    matching. The filtered results can then be evaluated using TrackEval or similar
+    MOT evaluation tools.
+
+    Configuration Categories:
+        - Data: Dataset path and sequence selection
+        - Matching: IoU threshold for detection-GT matching
+
+    Attributes:
+        dataset (str): Name/path of dataset to evaluate
+            Examples: "hill/test", "columbia/ice_melange"
+            Must contain ground_truth/, detections/, and tracking/ directories
+
+        iou_threshold (float): Minimum Intersection over Union for valid matches. Default: 0.5
+
+    Workflow:
+        1. Create config: config = EvalConfig(dataset="hill/test", iou_threshold=0.5)
+        2. Run evaluation: filter_tracking_to_gt(config)
+        3. Results saved to: dataset/tracking/track_eval.txt
+        4. Evaluate with TrackEval for metrics (HOTA, MOTA, IDF1)
+
+    Example:
+        >>> # Standard evaluation
+        >>> config = EvalConfig(dataset="hill/test")
+        >>> filter_tracking_to_gt(config)
+    """
+    # Data configuration
+    dataset: str
+
+    # Threshold configuration
+    iou_threshold: float = 0.5
 
 
 # ============================================================================
@@ -344,7 +388,7 @@ def update_with_track_ids(matched_detections, paths):
 # MAIN PIPELINE
 # ============================================================================
 
-def filter_tracking_to_gt(dataset, iou_threshold=0.5):
+def filter_tracking_to_gt(config: EvalConfig):
     """
     Complete pipeline to filter tracking results to ground truth coverage.
 
@@ -363,11 +407,7 @@ def filter_tracking_to_gt(dataset, iou_threshold=0.5):
         3. Report statistics
 
     Args:
-        dataset (str): Dataset path relative to DATA_DIR
-            Examples: "columbia/ice_melange", "columbia/clear"
-        iou_threshold (float): Minimum IoU for detection-GT matching
-            Default: 0.5 (MOT Challenge standard)
-            Range: [0.0, 1.0]
+        config (EvalConfig): Complete eval configuration
 
     Next Steps After Filtering:
         1. Verify output files exist: tracking/track_eval.txt
@@ -380,13 +420,13 @@ def filter_tracking_to_gt(dataset, iou_threshold=0.5):
     logger.info(f"\n{'=' * 60}")
     logger.info(f"Filtering Tracking Results to Ground Truth")
     logger.info(f"{'=' * 60}")
-    logger.info(f"Dataset: {dataset}")
+    logger.info(f"Dataset: {config.dataset}")
     logger.info(f"Data directory: {DATA_DIR}")
-    logger.info(f"IoU threshold: {iou_threshold}")
+    logger.info(f"IoU threshold: {config.iou_threshold}")
     logger.info(f"{'=' * 60}\n")
 
     # Load all sequences in the dataset
-    sequences = get_sequences(dataset)
+    sequences = get_sequences(config.dataset)
     logger.info(f"Found {len(sequences)} sequence(s)")
     logger.info(f"Sequences: {', '.join(sequences.keys())}\n")
 
@@ -398,7 +438,7 @@ def filter_tracking_to_gt(dataset, iou_threshold=0.5):
 
         # Step 1: Match detections to ground truth using bidirectional IoU
         logger.info("Step 1: Matching detections to ground truth...")
-        matched_detections = match_detections_to_gt(paths, iou_threshold=iou_threshold)
+        matched_detections = match_detections_to_gt(paths, iou_threshold=config.iou_threshold)
 
         # Skip if matching failed or no matches found
         if matched_detections is None or not matched_detections:
