@@ -1,4 +1,5 @@
 import cv2
+from dataclasses import dataclass
 import logging
 import matplotlib.pyplot as plt
 import numpy as np
@@ -35,6 +36,85 @@ Key Features:
 
 
 # ============================================================================
+# CONFIGURATION
+# ============================================================================
+
+@dataclass
+class VisualizationConfig:
+    """
+    Configuration for iceberg tracking visualization and video generation.
+
+    This dataclass centralizes all parameters for creating annotated images and videos
+    from iceberg tracking data. It supports multiple annotation sources and flexible
+    rendering options for analysis, validation, and presentation.
+
+    Configuration Categories:
+        - Data: Dataset and annotation source selection
+        - Processing: Frame range and display options
+        - Annotation: Visual elements to render (IDs, boxes, contours, masks)
+        - Video: Output video settings
+
+    Attributes:
+        dataset (str): Name/path of dataset to visualize
+            Examples: "hill/test", "columbia/ice_melange"
+            Must contain images/ directory and annotation files
+
+        annotation_source (str): Source of annotation data
+            Options:
+                - "tracking": Complete tracking results (default)
+                - "detections": Raw detector outputs
+                - "ground_truth": Manual annotations
+            Default: "tracking"
+
+        start_index (int): Starting frame index for processing. Default: 0 (start from beginning)
+
+        seq_length_limit (int | None): Maximum number of frames to process. Default: None (process all)
+
+        show_images (bool): Display images during processing. Default: False
+
+        draw_ids (bool): Draw iceberg ID numbers. Default: True
+        draw_boxes (bool): Draw bounding boxes. Default: True
+        draw_contours (bool): Draw SAM segmentation contours. Default: False
+        draw_masks (bool): Draw semi-transparent segmentation masks. Default: False
+        fps (int): Video frame rate (frames per second). Default: 7
+
+    Performance Notes:
+        - draw_contours or draw_masks: Requires SAM model (~400MB download on first use)
+        - SAM processing leads to major peformance decrease compare to annotate only bounding boxes / ID
+
+    Workflow:
+        1. Create config with desired options
+        2. Initialize Visualizer with config
+        3. Call annotate_icebergs() to process frames
+        4. Call render_video() to create MP4
+
+    Examples:
+        >>> # Basic visualization with IDs and boxes
+        >>> config = VisualizationConfig(
+        ...     dataset="hill/test",
+        ...     draw_ids=True,
+        ...     draw_boxes=True
+    """
+    # Data configuration
+    dataset: str
+
+    # General configurations
+    annotation_source: str = "tracking"
+    start_index: int = 0
+    seq_length_limit: int | None = None
+    show_images: bool = False
+
+    # Annotation configuration
+    draw_ids: bool = True
+    draw_boxes: bool = True
+    draw_contours: bool = False
+    draw_masks: bool = False
+
+    # Video configurations
+    fps: int = 7
+
+
+# ============================================================================
 # MAIN VISUALIZER CLASS
 # ============================================================================
 
@@ -62,17 +142,6 @@ class Visualizer:
         2. Call annotate_icebergs() to process frames
         3. Optionally call render_video() to create MP4
 
-    Attributes:
-        dataset (str): Dataset name/path
-        annotation_source (str): Source of annotations
-            - "ground_truth": Manual labels
-            - "detections": Detector outputs
-            - "tracking": Tracking results
-        show_images (bool): Display images during processing
-        start_index (int): Starting frame index
-        length (int): Number of frames to process
-        device (str): PyTorch device ('cuda' or 'cpu')
-
     Methods:
         annotate_icebergs(): Process frames and add annotations
         render_video(): Compile annotated images into video
@@ -84,50 +153,32 @@ class Visualizer:
         _export_images(): Save annotated frames
     """
 
-    def __init__(self, dataset, annotation_source="tracking", start_index=0, length=10, show_images=False):
+    def __init__(self, config: VisualizationConfig):
         """
         Initialize the Visualizer with dataset and configuration.
 
         Sets up paths, validates annotation source, and configures processing
         parameters for the visualization pipeline.
-
-        Args:
-            dataset (str): Dataset name/path (e.g., "columbia/ice_melange")
-            annotation_source (str): Source of annotations. Options:
-                - "ground_truth": Manual annotations
-                - "detections": Faster R-CNN detector outputs
-                - "tracking": Complete tracking results
-                Default: "tracking"
-            start_index (int): Starting frame index for processing
-                - Use to skip initial frames
-                - Default: 0 (start from beginning)
-            length (int): Number of frames to process
-                - Useful for testing or creating short clips
-                - Default: 10
-            show_images (bool): Display images during processing
-                - Uses matplotlib for display
-                - Slows down processing
-                - Useful for debugging
-                - Default: False
         """
-        self.dataset = dataset
-        self.annotation_source = annotation_source
-        self.show_images = show_images
-        self.start_index = start_index
-        self.length = length
+        self.dataset = config.dataset
+        self.annotation_source = config.annotation_source
+        self.show_images = config.show_images
+        self.start_index = config.start_index
+        self.seq_length_limit = config.seq_length_limit
+        self.config = config
 
         # Determine device for SAM model (GPU if available)
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
         # Validate annotation source
         valid_sources = ["ground_truth", "detections", "tracking"]
-        if annotation_source not in valid_sources:
+        if self.annotation_source not in valid_sources:
             raise ValueError(
-                f"Invalid annotation source '{annotation_source}'. "
+                f"Invalid annotation source '{self.annotation_source}'. "
                 f"Must be one of: {', '.join(valid_sources)}"
             )
 
-    def annotate_icebergs(self, draw_ids=False, draw_boxes=False, draw_contours=False, draw_masks=False):
+    def annotate_icebergs(self):
         """
         Annotate iceberg images with various visualization options.
 
@@ -141,20 +192,14 @@ class Visualizer:
             draw_contours: Display precise boundaries using SAM
             draw_masks: Display semi-transparent segmentation masks
 
-        Args:
-            draw_ids (bool): Draw iceberg IDs as text. Default: False
-            draw_boxes (bool): Draw bounding boxes. Default: False
-            draw_contours (bool): Draw SAM-generated contours. Default: False
-            draw_masks (bool): Draw SAM-generated masks. Default: False
-
         Performance:
             - SAM segmentation adds significant processing time
         """
         logger.info("Starting iceberg annotation with configuration:")
-        logger.info(f"  draw_ids = {draw_ids}")
-        logger.info(f"  draw_boxes = {draw_boxes}")
-        logger.info(f"  draw_contours = {draw_contours}")
-        logger.info(f"  draw_masks = {draw_masks}")
+        logger.info(f"  draw_ids = {self.config.draw_ids}")
+        logger.info(f"  draw_boxes = {self.config.draw_boxes}")
+        logger.info(f"  draw_contours = {self.config.draw_contours}")
+        logger.info(f"  draw_masks = {self.config.draw_masks}")
 
         # Get all sequences in the dataset
         sequences = get_sequences(self.dataset)
@@ -168,7 +213,7 @@ class Visualizer:
             icebergs_by_frame, image_ext = self._get_selection(output_type="image", paths=paths)
 
             # Initialize SAM predictor if contours or masks are needed
-            if draw_contours or draw_masks:
+            if self.config.draw_contours or self.config.draw_masks:
                 sam_predictor = self._get_sam_predictor()
             else:
                 sam_predictor = None
@@ -178,31 +223,23 @@ class Visualizer:
                 icebergs_by_frame,
                 paths,
                 image_ext,
-                draw_ids,
-                draw_boxes,
-                draw_contours,
-                draw_masks,
                 sam_predictor
             )
 
             logger.info("Annotation complete.")
 
             # Save the annotated images
-            self._export_images(icebergs_by_frame, images, sequence_name, paths)
+            self._export_images(icebergs_by_frame, images, paths)
 
-    def render_video(self, fps=1):
+    def render_video(self):
         """
         Create an MP4 video from annotated images.
 
         Compiles the annotated images (created by annotate_icebergs) into a
         single video file with the specified frame rate. This is useful for
         creating timelapse visualizations or presentation materials.
-
-        Args:
-            fps (int): Frames per second for output video
-                Default: 1
         """
-        logger.info(f"Starting video rendering at {fps} fps...")
+        logger.info(f"Starting video rendering at {self.config.fps} fps...")
 
         sequences = get_sequences(self.dataset)
 
@@ -239,7 +276,7 @@ class Visualizer:
 
             # Initialize video writer with MP4 codec
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            video_writer = cv2.VideoWriter(video_path, fourcc, fps, (width, height))
+            video_writer = cv2.VideoWriter(video_path, fourcc, self.config.fps, (width, height))
 
             # Write each frame to the video with progress tracking
             logger.info("Writing frames to video...")
@@ -288,7 +325,13 @@ class Visualizer:
         images.sort()
 
         # Slice to get only the requested range
-        images = images[self.start_index:self.start_index + self.length]
+        if self.seq_length_limit is None:
+            end_frame = len(images)
+        else:
+            end_frame = min(self.start_index + self.seq_length_limit, len(images))
+
+        images = images[self.start_index:end_frame]
+
         logger.info(f"Selected {len(images)} frames (index {self.start_index} to {self.start_index + len(images) - 1})")
 
         if output_type == "image":
@@ -375,8 +418,7 @@ class Visualizer:
 
         return SamPredictor(sam)
 
-    def _map_icebergs(self, icebergs_by_frame, paths, image_ext, draw_ids, draw_boxes, draw_contours, draw_masks,
-                      sam_predictor=None):
+    def _map_icebergs(self, icebergs_by_frame, paths, image_ext, sam_predictor=None):
         """
         Process all frames and add iceberg annotations to images.
 
@@ -388,10 +430,6 @@ class Visualizer:
             icebergs_by_frame (dict): Frame name -> iceberg data mapping
             paths (dict): Paths dictionary from get_sequences()
             image_ext (str): Image file extension (e.g., "jpg")
-            draw_ids (bool): Whether to draw iceberg IDs
-            draw_boxes (bool): Whether to draw bounding boxes
-            draw_contours (bool): Whether to draw SAM contours
-            draw_masks (bool): Whether to draw SAM masks
             sam_predictor (SamPredictor | None): SAM predictor instance
 
         Returns:
@@ -422,7 +460,7 @@ class Visualizer:
                 raise FileNotFoundError(f"Image file not found: {image_path}")
 
             # Prepare SAM predictor if needed for segmentation
-            if draw_contours or draw_masks:
+            if self.config.draw_contours or self.config.draw_masks:
                 # SAM expects RGB, OpenCV loads as BGR
                 outline_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                 sam_predictor.set_image(outline_img)
@@ -440,7 +478,7 @@ class Visualizer:
                 y2 = y1 + h  # Bottom edge
 
                 # Draw iceberg ID text if requested
-                if draw_ids:
+                if self.config.draw_ids:
                     # Position text above bounding box (with minimum y to stay on screen)
                     text_y = max(int(y1) - 10, 20)
                     cv2.putText(
@@ -454,7 +492,7 @@ class Visualizer:
                     )
 
                 # Draw bounding box if requested
-                if draw_boxes:
+                if self.config.draw_boxes:
                     cv2.rectangle(
                         img,
                         (int(x1), int(y1)),  # Top-left corner
@@ -464,7 +502,7 @@ class Visualizer:
                     )
 
                 # Generate and draw segmentation if requested
-                if draw_contours or draw_masks:
+                if self.config.draw_contours or self.config.draw_masks:
                     # Run SAM segmentation with bounding box as prompt
                     contours, mask, score = self._segment_icebergs(
                         sam_predictor,
@@ -472,7 +510,7 @@ class Visualizer:
                     )
 
                     # Apply semi-transparent mask overlay if requested
-                    if draw_masks:
+                    if self.config.draw_masks:
                         mask_alpha = 0.5  # 50% transparency
                         # Blend original image with solid color using mask
                         img[mask] = (
@@ -481,7 +519,7 @@ class Visualizer:
                         ).astype(np.uint8)
 
                     # Draw contour outline if requested
-                    if draw_contours:
+                    if self.config.draw_contours:
                         cv2.drawContours(
                             img,
                             contours,
@@ -590,7 +628,7 @@ class Visualizer:
 
         return contours, mask, score
 
-    def _export_images(self, icebergs_by_frame, images, sequence_name, paths):
+    def _export_images(self, icebergs_by_frame, images, paths):
         """
         Save annotated images to the output directory.
 
@@ -604,7 +642,6 @@ class Visualizer:
             images (list): Annotated images as numpy arrays
                 - Must match order of icebergs_by_frame
                 - BGR format (OpenCV)
-            sequence_name (str): Name of the sequence being processed
             paths (dict): Paths dictionary from get_sequences()
         """
         # Create output directory structure
