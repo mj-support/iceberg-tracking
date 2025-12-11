@@ -9,7 +9,7 @@ from tqdm import tqdm
 
 from utils.feature_extraction import get_distance, get_size_similarity, get_appearance_similarity, \
     min_max_normalize, get_score, get_gt_thresholds
-from utils.helpers import load_icebergs_by_frame, sort_file, get_sequences, load_config_file
+from utils.helpers import load_icebergs_by_frame, sort_file, get_sequences
 
 # Configure logging
 logging.basicConfig(
