@@ -2,6 +2,8 @@ import logging
 import os
 from collections import defaultdict
 from pathlib import Path
+from omegaconf import OmegaConf
+import argparse
 
 # Configure logging
 logging.basicConfig(
@@ -20,7 +22,7 @@ that are used throughout the detection, tracking, and evaluation workflows.
 """
 
 # ============================================================================
-# PROJECT DIRECTORY CONFIGURATION
+# CONFIGURATION MANAGEMENT
 # ============================================================================
 
 # Project directory structure configuration
@@ -29,6 +31,259 @@ CURRENT_FILE = Path(__file__).resolve()
 PROJECT_ROOT = CURRENT_FILE.parents[2]  # Navigate up two levels from src/utils/
 DATA_DIR = PROJECT_ROOT / "data"  # Main data directory
 SRC_DIR = PROJECT_ROOT / "src"  # Source code directory
+
+
+def parse_cli_args():
+    """
+    Parse command-line arguments for the iceberg tracking pipeline.
+
+    This function handles the complete CLI argument parsing workflow, including
+    command selection, config file specification, and flexible key=value parameter
+    overrides. It uses argparse for command structure and custom parsing for
+    parameter overrides, providing a clean and intuitive CLI interface.
+
+    Architecture:
+        The CLI uses a command-based structure similar to git, docker, or MLflow:
+
+        python run_pipeline.py <command> [cfg=config.yaml] [param=value ...]
+
+    Commands:
+        - train-embedding: Train ViT embedding model for appearance similarity
+        - train-detection: Train Faster R-CNN detection model
+        - detect: Run iceberg detection on images
+        - track: Run multi-object tracking
+        - eval: Evaluate tracking results against ground truth
+        - visualize: Create annotated images and videos
+
+    Parameter Override Syntax:
+        Uses simple key=value pairs with automatic type inference:
+        - dataset=hill/test          → str
+        - max_age=7                  → int
+        - conf_threshold=0.7         → float
+
+    Config File Handling:
+        Each command has a default config file that can be overridden:
+        - cfg=custom.yaml overrides the default
+        - If no cfg specified, uses command-specific default
+        - Config defaults defined in cfg_defaults dictionary
+
+    Returns:
+        tuple: (command, config_file, overrides)
+            - command (str): Selected command name
+                Examples: 'detect', 'track', 'eval'
+            - config_file (str): Path to YAML config file
+                Examples: 'cfgs/detect.yaml', 'cfgs/track.yaml'
+            - overrides (dict): Key-value parameter overrides
+                Examples: {'dataset': 'hill/test', 'max_age': 7}
+
+    Usage Examples:
+        >>> # Basic command with default config
+        >>> python run_pipeline.py detect dataset=hill/test
+        >>> # Returns: ('detect', 'cfgs/detect.yaml', {'dataset': 'hill/test'})
+
+        >>> # Custom config with overrides
+        >>> python run_pipeline.py track cfg=cfgs/track.yaml dataset=hill/test max_age=7
+        >>> # Returns: ('track', 'cfgs/track_dense.yaml', {'dataset': 'hill/test', 'max_age': 7})
+
+        >>> # Multiple overrides with type inference
+        >>> python run_pipeline.py detect dataset=hill/test conf_threshold=0.7 postprocess=false
+        >>> # Returns: ('detect', 'cfgs/detect.yaml',
+        >>> #          {'dataset': 'hill/test', 'conf_threshold': 0.7, 'use_postprocess': False})
+
+    Notes:
+        - The cfg parameter is special: it's extracted from overrides and returned separately
+        - All other key=value pairs become config overrides
+        - Command is required (parser.add_subparsers with required=True)
+        - Unknown arguments without '=' are silently ignored
+
+    Integration:
+        This function is called by the python file in the 'script/' directory.
+        cmd, cfg_file, overrides = parse_cli_args()
+        config = load_config(cfg_file, **overrides)
+        # Execute command with config...
+    """
+    parser = argparse.ArgumentParser(description="Iceberg Pipeline")
+    sub = parser.add_subparsers(dest='cmd', required=True)
+
+    # Just define commands, no arguments
+    sub.add_parser('train-embedding')
+    sub.add_parser('train-detection')
+    sub.add_parser('detect')
+    sub.add_parser('track')
+    sub.add_parser('eval')
+    sub.add_parser('visualize')
+
+    args, unknown = parser.parse_known_args()
+
+    # Parse ALL key=value pairs
+    overrides = {}
+    for arg in unknown:
+        if '=' in arg:
+            key, value = arg.split('=', 1)
+            # Type inference
+            try:
+                value = int(value)
+            except ValueError:
+                try:
+                    value = float(value)
+                except ValueError:
+                    if value.lower() in ('true', 'false'):
+                        value = value.lower() == 'true'
+            overrides[key] = value
+
+    # Default config files
+    cfg_defaults = {
+        'train-embedding': 'cfgs/embed.yaml',
+        'train-detection': 'cfgs/detect.yaml',
+        'detect': 'cfgs/detect.yaml',
+        'track': 'cfgs/track.yaml',
+        'eval': 'cfgs/eval.yaml',
+        'visualize': 'cfgs/visualize.yaml',
+    }
+
+    cfg_file = overrides.pop('cfg', cfg_defaults.get(args.cmd))
+
+    return args.cmd, cfg_file, overrides
+
+
+def load_config(config_file, **overrides):
+    """
+    Load configuration from YAML file and apply parameter overrides.
+
+    This is the central configuration loading function that handles YAML parsing,
+    parameter validation, type conversions, and automatic dataclass instantiation.
+    It provides a unified interface for loading configurations in both CLI and
+    Python contexts, with support for flexible parameter overrides.
+
+    The function automatically detects the appropriate configuration dataclass
+    based on the config filename and returns a properly initialized instance
+    with all validations and type conversions applied.
+
+    Architecture:
+        YAML File → OmegaConf → Python Dict → Apply Overrides → Dataclass Instance
+
+    Supported Config Types:
+        - embed.yaml     → IcebergEmbeddingsConfig
+        - detect.yaml    → IcebergDetectionConfig
+        - track.yaml     → IcebergTrackingConfig
+        - eval.yaml      → EvalConfig
+        - visualize.yaml → VisualizationConfig
+
+    Override Priority:
+        YAML defaults < Python overrides
+        Overrides completely replace YAML values for specified keys.
+
+    Args:
+        config_file (str): Path to YAML config file relative to PROJECT_ROOT
+            Examples:
+                - "cfgs/detect.yaml"
+                - "cfgs/track.yaml"
+                - "my_experiments/custom_config.yaml"
+
+        **overrides: Keyword arguments to override YAML parameters
+            Examples:
+                - dataset="hill/test"
+                - max_age=7
+                - conf_threshold=0.7
+                - use_kalman=False
+
+            Any parameter defined in the target dataclass can be overridden.
+            Overrides are applied after loading YAML, so they take precedence.
+
+    Returns:
+        Dataclass instance: Properly initialized configuration object
+            Type depends on config_file name:
+            - IcebergEmbeddingsConfig
+            - IcebergDetectionConfig
+            - IcebergTrackingConfig
+            - EvalConfig
+            - VisualizationConfig
+
+            All dataclass __post_init__ validations and type conversions
+            are automatically applied.
+
+    Raises:
+        ValueError: If dataset parameter is missing.
+
+        ValueError: If config_file doesn't match any known config type
+            Config filename must contain one of: embed, detect, track, eval, visualize
+
+        FileNotFoundError: If config_file doesn't exist
+            Raised by OmegaConf.load()
+
+        TypeError: If overrides contain invalid parameters
+            Raised by dataclass constructor
+
+    Usage Examples:
+        >>> # Load with default parameters
+        >>> config = load_config("cfgs/detect.yaml", dataset="hill/test")
+        >>> print(config.conf_threshold)  # From YAML
+        0.1
+
+        >>> # Load with overrides
+        >>> config = load_config(
+        ...     "cfgs/detect.yaml",
+        ...     dataset="hill/test",
+        ...     conf_threshold=0.7,
+        ...     scales=[0.5, 1.0, 1.5]
+        ... )
+        >>> print(config.conf_threshold)  # Overridden
+        0.7
+
+        >>> # From CLI (via parse_cli_args)
+        >>> cmd, cfg_file, overrides = parse_cli_args()
+        >>> config = load_config(cfg_file, **overrides)
+
+        >>> # In Python script or notebook
+        >>> config = load_config("cfgs/track.yaml")
+        >>> config.dataset = "hill/test"  # Can also modify after loading
+        >>> config.max_age = 7
+
+    Type Detection Logic:
+        The function uses simple substring matching to determine config type:
+        - "embed" in filename    → IcebergEmbeddingsConfig
+        - "detect" in filename   → IcebergDetectionConfig
+        - "track" in filename    → IcebergTrackingConfig
+        - "eval" in filename     → EvalConfig
+        - "visualize" in filename → VisualizationConfig
+
+    Integration:
+        This function is the bridge between YAML configs and Python dataclasses:
+        a) CLI Path: parse_cli_args() → load_config() → Dataclass → Pipeline
+        b) Python Path: load_config() → Dataclass → Pipeline
+        c) Notebook Path: load_config() → Modify attributes → Pipeline
+    """
+    config = OmegaConf.load(PROJECT_ROOT / config_file)
+    config_dict = OmegaConf.to_container(config, resolve=True)
+    config_dict.update(overrides)
+
+    if not config_dict.get('dataset'):
+        raise ValueError(
+            f"Dataset path not specified.\n\n"
+            f"Provide the dataset (e.g. 'hill/test') using either:\n"
+            f"  • Config file in: dataset: 'hill/test' (in cfgs/*.yaml)\n"
+            f"  • Command line: dataset=hill/test\n"
+            f"  • Python code: config.dataset = 'hill/test'\n\n"
+            f"Current value: {config.dataset!r}"
+        )
+
+    if "embed" in config_file:
+        from embedding import IcebergEmbeddingsConfig
+        return IcebergEmbeddingsConfig(**config_dict)
+    elif "detect" in config_file:
+        from detection import IcebergDetectionConfig
+        return IcebergDetectionConfig(**config_dict)
+    elif "track" in config_file:
+        from tracking import IcebergTrackingConfig
+        return IcebergTrackingConfig(**config_dict)
+    elif "eval" in config_file:
+        from utils.eval import EvalConfig
+        return EvalConfig(**config_dict)
+    elif "visualize" in config_file:
+        from utils.visualize import VisualizationConfig
+        return VisualizationConfig(**config_dict)
+    else:
+        raise ValueError(f"Unknown config type: {config_file}")
 
 
 # ============================================================================
@@ -278,7 +533,6 @@ def extract_matches(candidates):
 # ============================================================================
 # PATH MANAGEMENT
 # ============================================================================
-
 def get_sequences(dataset):
     """
     Discover and map all sequences in a dataset with their file paths.
