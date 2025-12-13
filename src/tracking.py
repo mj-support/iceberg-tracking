@@ -868,30 +868,25 @@ class IcebergTracker:
         Returns:
             float | None: Weighted similarity score [0, 1] or None if filtered out
         """
-        # Get Kalman predicted position (motion-aware)
-        predicted_bbox = track.predicted_bbox
-        predicted_iceberg = {'bbox': predicted_bbox}
-
         # Get last known position (conservative fallback)
         last_iceberg = {'bbox': track.last_bbox}
 
         # Current detection
         detection_iceberg = {'bbox': detection['bbox']}
 
-        # Compute distance to Kalman predicted position
-        distance_kalman = get_distance(predicted_iceberg, detection_iceberg)
-
         # Compute distance to last known position
         distance_last = get_distance(last_iceberg, detection_iceberg)
-
-        # Weighted blend: favor Kalman but be conservative
-        kalman_weight = self.config.kalman_distance_weight
-        distance = (kalman_weight * distance_kalman +
-                    (1 - kalman_weight) * distance_last)
-
         # Threshold cascade: check cheap features first
-        # Use relaxed thresholds (*1.5 or /1.5) for initial filtering
-        if distance <= self.thresholds['distance'] * (1 + self.config.threshold_tolerance_factor):
+        if distance_last <= self.thresholds['distance'] * (1 + self.config.threshold_tolerance_factor):
+            # Get Kalman predicted position (motion-aware)
+            predicted_bbox = track.predicted_bbox
+            predicted_iceberg = {'bbox': predicted_bbox}
+            # Compute distance to Kalman predicted position
+            distance_kalman = get_distance(predicted_iceberg, detection_iceberg)
+            # Weighted blend: favor Kalman but be conservative
+            kalman_weight = self.config.kalman_distance_weight
+            distance = (kalman_weight * distance_kalman + (1 - kalman_weight) * distance_last)
+
             # Size similarity (medium cost)
             size_similarity = get_size_similarity(predicted_iceberg, detection_iceberg)
 
@@ -902,7 +897,7 @@ class IcebergTracker:
                 if appearance_similarity >= self.thresholds['appearance'] / (1 + self.config.threshold_tolerance_factor):
                     # Normalize distance to [0, 1] (1 = close, 0 = far)
                     distance_norm = 1 - min_max_normalize(
-                        distance, 0, self.thresholds['distance'],
+                        distance, 0, self.thresholds['distance'] * (1 + self.config.threshold_tolerance_factor)
                     )
 
                     # Compute unweighted overall score (equal weights)
