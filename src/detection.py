@@ -104,7 +104,6 @@ class IcebergDetectionConfig:
         # Training Parameters
         k_folds (int): Number of folds for cross-validation (improves generalization)
         num_epochs (int): Maximum training epochs per fold
-        patience (int): Early stopping patience (epochs without val loss improvement)
         batch_size (int): Number of images per training batch
         learning_rate (float): Initial learning rate for SGD optimizer
         momentum (float): SGD momentum parameter (helps escape local minima)
@@ -162,7 +161,6 @@ class IcebergDetectionConfig:
     # Training parameters - Control optimization process
     k_folds: int = 5
     num_epochs: int = 4
-    patience: int = 4  # Early stopping patience
     batch_size: int = 2
     learning_rate: float = 0.005
     momentum: float = 0.9
@@ -488,7 +486,6 @@ class IcebergDetector:
         # Extract configuration parameters
         k_folds = self.config.k_folds
         num_epochs = self.config.num_epochs
-        patience = self.config.patience
         batch_size = self.config.batch_size
         learning_rate = self.config.learning_rate
 
@@ -535,7 +532,6 @@ class IcebergDetector:
             # Training variables for this fold
             best_val_loss = float('inf')
             best_model_state = None
-            epochs_no_improve = 0
 
             # Epoch training loop
             for epoch in range(num_epochs):
@@ -567,14 +563,6 @@ class IcebergDetector:
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
                     best_model_state = copy.deepcopy(model.state_dict())
-                    epochs_no_improve = 0
-                else:
-                    epochs_no_improve += 1
-
-                # Early stopping if no improvement
-                if epochs_no_improve >= patience:
-                    logger.info(f"Early stopping after {epochs_no_improve} epochs without improvement")
-                    break
 
             # Update overall best model across all folds
             if best_val_loss < best_val_loss_overall:

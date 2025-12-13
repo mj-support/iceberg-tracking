@@ -10,7 +10,6 @@ anchor_aspect_ratios: [[0.5, 1.0, 2.0], [0.5, 1.0, 2.0], [0.5, 1.0, 2.0], [0.5, 
 # Training parameters - Control optimization process
 k_folds: 5
 num_epochs: 4
-patience: 4
 batch_size: 2
 learning_rate: 0.005
 momentum: 0.9
@@ -24,7 +23,7 @@ rpn_score_thresh: 0.0
 
 # Inference parameters - Control prediction pipeline
 confidence_threshold: 0.1
-scales: [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]
+scales: [0.5, 1.0, 1.5, 2.0]
 window_size: [1024, 1024]
 overlap: 0.2
 iou_threshold: 0.3
