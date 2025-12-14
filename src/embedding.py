@@ -64,7 +64,7 @@ Pipeline Stages:
 
 Technical Details:
     - Vision Transformer Configuration: 6-layer encoder, 6 attention heads, 384-dim embeddings
-    - Training: Adam optimizer with learning rate scheduling
+    - Training: AdamW optimizer with learning rate scheduling
     - Loss: α * Contrastive + (1-α) * Cosine, where α=0.7
     - Data Augmentation: Color jitter, flips, rotation for robustness
     - Evaluation: ROC-AUC and Average Precision metrics
@@ -115,8 +115,8 @@ class IcebergEmbeddingsConfig:
         # Training Configuration
         batch_size (int): Training batch size (limited by GPU memory)
         val_batch_size (int): Validation batch size (can be larger since no gradients)
-        learning_rate (float): Initial learning rate for Adam optimizer
-        weight_decay (float): L2 regularization weight for Adam
+        learning_rate (float): Initial learning rate for AdamW optimizer
+        weight_decay (float): L2 regularization weight for AdamW
         num_epochs (int): Maximum number of training epochs
         patience (int): Early stopping patience (epochs without improvement)
         min_delta (float): Minimum AUC improvement to reset patience counter
@@ -1149,7 +1149,7 @@ class IcebergEmbeddingsTrainer:
         model (SiameseNetwork): The Siamese network model
         train_loader (DataLoader): Training data loader
         val_loader (DataLoader): Validation data loader
-        optimizer (optim.Optimizer): Adam optimizer
+        optimizer (optim.Optimizer): AdamW optimizer
         scheduler (optim.Scheduler): Learning rate scheduler
         criterion (nn.Module): Combined loss function
         device (torch.device): Computing device (GPU/CPU)
@@ -1443,7 +1443,7 @@ class IcebergEmbeddingsTrainer:
 
         Sets up all components needed for training:
         - Model: Siamese network with ViT backbone
-        - Optimizer: Adam with weight decay
+        - Optimizer: AdamW with weight decay
         - Scheduler: Step learning rate decay
         - Loss: Combined contrastive + cosine loss
 
@@ -1455,8 +1455,8 @@ class IcebergEmbeddingsTrainer:
         # Initialize model using factory function
         self.model = self.model_factory().to(self.device)
 
-        # Setup Adam optimizer with weight decay (L2 regularization)
-        self.optimizer = optim.Adam(
+        # Setup AdamW optimizer with weight decay (L2 regularization)
+        self.optimizer = optim.AdamW(
             self.model.parameters(),
             lr=self.config.learning_rate,
             weight_decay=self.config.weight_decay
