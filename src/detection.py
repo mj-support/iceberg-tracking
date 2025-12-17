@@ -20,7 +20,7 @@ from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 from typing import Tuple, List
 
 from embedding import IcebergEmbeddingsConfig, IcebergEmbeddingsTrainer
-from utils.helpers import DATA_DIR, PROJECT_ROOT, sort_file, get_sequences, load_icebergs_by_frame, get_image_ext
+from utils.helpers import DATA_DIR, PROJECT_ROOT, sort_file, get_sequences, get_image_ext, calculate_iou
 
 # Configure logging
 logging.basicConfig(
@@ -100,6 +100,7 @@ class IcebergDetectionConfig:
             Multiple sizes handle objects at different scales
         anchor_aspect_ratios (Tuple): Aspect ratios for anchor boxes at each level
             Common ratios: 0.5 (wide), 1.0 (square), 2.0 (tall)
+            -> Iceberg on images appear usually more wide than quadratic or tall
 
         # Training Parameters
         k_folds (int): Number of folds for cross-validation (improves generalization)
@@ -113,7 +114,6 @@ class IcebergDetectionConfig:
         box_detections_per_img (int): Maximum detections per image
         box_nms_thresh (float): NMS IoU threshold for final detections
         rpn_nms_thresh (float): NMS IoU threshold for Region Proposal Network
-        rpn_score_thresh (float): Minimum score for RPN proposals
 
         # Inference Parameters
         confidence_threshold (float): Minimum confidence score to keep detections
@@ -121,7 +121,6 @@ class IcebergDetectionConfig:
             Example: [0.5, 1.0, 2.0] means test at 50%, 100%, and 200% size
         window_size (Tuple[int, int]): Sliding window dimensions (width, height)
         overlap (float): Overlap ratio between adjacent sliding windows [0, 1)
-        iou_threshold (float): IoU threshold for removing duplicate detections
 
         # Postprocessing Parameters (applied inline during inference)
         postprocess (bool): Whether to apply filtering (typically always True)
@@ -130,7 +129,7 @@ class IcebergDetectionConfig:
         edge_tolerance (int): Minimum distance from image edge (pixels)
         mask_ratio_threshold (float): Maximum fraction of detection that can be masked
         min_iceberg_size (float): Minimum bounding box area (pixels²)
-        max_iceberg_overlap (float): Maximum IoU for nested detection removal
+        nested_threshold (float): Maximum IoU for nested detection removal
 
         # Training Checkpoints
         save_checkpoints (bool): Save model weights after each epoch
@@ -156,7 +155,7 @@ class IcebergDetectionConfig:
     # Model parameters - Define Faster R-CNN architecture
     num_classes: int = 2  # Background + iceberg
     anchor_sizes: Tuple[Tuple[int, ...], ...] = ((16,), (32,), (64,), (128,), (256,))
-    anchor_aspect_ratios: Tuple[Tuple[float, ...], ...] = ((0.5, 1.0, 2.0),) * 5
+    anchor_aspect_ratios: Tuple[Tuple[float, ...], ...] = ((0.4, 0.5, 0.7),) * 5
 
     # Training parameters - Control optimization process
     k_folds: int = 5
@@ -167,26 +166,24 @@ class IcebergDetectionConfig:
     weight_decay: float = 0.0005
 
     # Detection parameters - Control model inference behavior
-    box_detections_per_img: int = 1000
-    box_nms_thresh: float = 0.3
-    rpn_nms_thresh: float = 0.5
-    rpn_score_thresh: float = 0.0
+    box_detections_per_img: int = 5000
+    box_nms_thresh: float = 0.5
+    rpn_nms_thresh: float = 0.7
 
     # Inference parameters - Control prediction pipeline
     confidence_threshold: float = 0.1
     scales: List[float] = None  # Set in __post_init__
-    window_size: Tuple[int, int] = (1024, 1024)
-    overlap: float = 0.2
-    iou_threshold: float = 0.3
+    window_size: Tuple[int, int] = (1536, 1536)
+    overlap: float = 0.35
 
     # Postprocessing parameters - Applied inline during inference
     postprocess: bool = True
     generate_embeddings: bool = True
     edge_tolerance: int = 0
-    mask_ratio_threshold: float = 0.02
+    mask_ratio_threshold: float = 0.1
     filter_masked_regions: bool = True
     min_iceberg_size: float = 0.0
-    max_iceberg_overlap: float = 0.5
+    nested_threshold: float = 0.7
 
     # Training checkpoints
     save_checkpoints: bool = False
@@ -205,7 +202,7 @@ class IcebergDetectionConfig:
         Sets default multi-scale factors if not provided.
         """
         if self.scales is None:
-            self.scales = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]
+            self.scales = [0.5, 1]
 
 
 # ================================
@@ -610,57 +607,13 @@ class IcebergDetector:
             detector.predict(output_subdir="epoch3",
                            checkpoint_path="models/checkpoints/model_fold1_epoch3.pth")
         """
-        confidence_threshold = self.config.confidence_threshold
-
         logger.info("\n=== INFERENCE PHASE ===")
         logger.info("Starting prediction with inline filtering...")
 
         # Load model
         self._load_model(checkpoint_path)
         self.model.eval()
-
-        # Load mask and get image dimensions if filtering is enabled
-        mask = None
-        img_width, img_height = None, None
-
-        if self.config.filter_masked_regions or self.config.edge_tolerance > 0:
-            # Get image dimensions from first available sequence
-            sequences = get_sequences(self.dataset)
-            first_seq = next(iter(sequences.values()))
-            first_seq_image_dir = first_seq["images"]
-            image_ext = get_image_ext(first_seq_image_dir)
-            sample_img = [f for f in os.listdir(first_seq_image_dir)
-                          if f.endswith(image_ext)][0]
-            sample_path = os.path.join(first_seq_image_dir, sample_img)
-            img_height, img_width = cv2.imread(sample_path).shape[:2]
-
-            # Load mask if masking is enabled
-            if self.config.filter_masked_regions:
-                mask_file = None
-                mask_dir = os.path.join(DATA_DIR, self.dataset.split("/")[0])
-
-                # Try multiple image extensions
-                for ext in ['.jpg', '.JPG', '.png', '.PNG', '.jpeg', '.JPEG']:
-                    candidate = os.path.join(mask_dir, f"mask{ext}")
-                    if os.path.exists(candidate):
-                        mask_file = candidate
-                        break
-
-                if mask_file is None:
-                    logger.warning(f"Mask file not found in {mask_dir}")
-                else:
-                    # Load mask as binary (True = masked/land, False = valid/water)
-                    mask = cv2.imread(mask_file, cv2.IMREAD_GRAYSCALE).astype(bool)
-                    logger.info(f"Loaded mask: {img_width}x{img_height}")
-                    logger.info(f"Mask filtering enabled (threshold: {self.config.mask_ratio_threshold})")
-
-        # Log active filtering configuration
-        if self.config.edge_tolerance > 0:
-            logger.info(f"Edge filtering enabled (tolerance: {self.config.edge_tolerance}px)")
-        if self.config.min_iceberg_size > 0:
-            logger.info(f"Size filtering enabled (min size: {self.config.min_iceberg_size}px²)")
-        if self.config.confidence_threshold > 0:
-            logger.info(f"Confidence filtering enabled (threshold: {self.config.confidence_threshold})")
+        mask, img_width, img_height = self._load_filter()
 
         # Process all sequences
         logger.info(f"\nLoading {self.dataset} sequences from: {DATA_DIR}")
@@ -669,24 +622,8 @@ class IcebergDetector:
         logger.info(f"Sequence names: {', '.join(sequences.keys())}")
 
         for sequence_name, paths in sequences.items():
-            # Override detection path if custom output subdirectory is specified
-            if output_subdir is not None:
-                # Create custom detections directory
-                custom_det_dir = paths['detections'].parent.parent / f'detections_{output_subdir}'
-                custom_det_dir.mkdir(parents=True, exist_ok=True)
-                custom_det_file = custom_det_dir / 'det.txt'
-                paths['detections'] = custom_det_file
-                logger.info(f"Saving detections to: {custom_det_file}")
-            else:
-                # Use default detections directory
-                base_path = str(paths["images"]).split("/images")[0]
-                det_dir = os.path.join(base_path, "detections")
-                os.makedirs(det_dir, exist_ok=True)
-
-            # Get all image files in sequence
-            image_ext = get_image_ext(paths['images'])
-            image_files = [f for f in os.listdir(paths["images"])
-                           if f.endswith(image_ext)]
+            image_ext = self._get_paths(paths, output_subdir)
+            image_files = [f for f in os.listdir(paths["images"]) if f.endswith(image_ext)]
             all_detections = []
             total_start_time = time.time()
 
@@ -698,20 +635,10 @@ class IcebergDetector:
                 img_name = os.path.splitext(img_file)[0]
 
                 # Run both detection methods with inline filtering
-                multi_scale_dets = self._run_multi_scale_prediction(
-                    img_path, confidence_threshold, mask, img_width, img_height
-                )
-                sliding_window_dets = self._run_sliding_window_prediction(
-                    img_path, confidence_threshold, mask, img_width, img_height
-                )
-
-                # Combine detections (already filtered, so much faster!)
-                final_detections = self._remove_overlaps(
-                    multi_scale_dets, sliding_window_dets, self.config.iou_threshold
-                )
+                detections = self._run_multi_scale_sliding_window_prediction(img_path, mask, img_width, img_height)
 
                 # Add metadata for output
-                for i, det in enumerate(final_detections):
+                for i, det in enumerate(detections):
                     det['image'] = img_name
                     det['object_id'] = i + 1
                     all_detections.append(det)
@@ -725,12 +652,6 @@ class IcebergDetector:
 
             # Save detections (already filtered, no postprocessing needed!)
             self._save_detections(all_detections, paths['detections'])
-
-            # Remove nested detections if overlap threshold is set
-            if self.config.max_iceberg_overlap < 1.0:
-                removed_detections = self._remove_nested_detections(paths['detections'])
-                detections_len -= removed_detections
-
             logger.info(f"\n✓ {sequence_name}: {detections_len} detections across "
                         f"{len(image_files)} images")
             logger.info(f"  Detections saved to: {paths['detections']}")
@@ -750,7 +671,6 @@ class IcebergDetector:
     # ================================
     # MODEL BUILDING METHODS
     # ================================
-
     def _get_multi_seq_dataset(self):
         """
         Load and combine datasets from all sequences.
@@ -872,7 +792,6 @@ class IcebergDetector:
             box_detections_per_img=self.config.box_detections_per_img,
             box_nms_thresh=self.config.box_nms_thresh,
             rpn_nms_thresh=self.config.rpn_nms_thresh,
-            rpn_score_thresh=self.config.rpn_score_thresh,
         )
 
         # Load compatible pretrained weights for faster convergence
@@ -944,105 +863,9 @@ class IcebergDetector:
             raise FileNotFoundError(f"No trained model found at {file_path}")
 
         return self.model
-
-    def test_all_checkpoints(self, checkpoint_pattern="model_fold1_epoch*"):
-        """
-        Test all checkpoints matching a pattern and compare results.
-
-        Useful for finding the optimal epoch that balances underfitting and
-        overfitting. Tests each checkpoint and reports detection statistics.
-
-        Args:
-            checkpoint_pattern (str): Glob pattern for checkpoint files.
-                Default: "model_fold1_epoch*" (all epochs from fold 1)
-
-        Returns:
-            list: List of dicts with results for each checkpoint:
-                - checkpoint: Checkpoint filename
-                - epoch: Epoch number
-                - total_detections: Total number of detections
-                - total_images: Number of images processed
-                - avg_per_image: Average detections per image
-
-        Example:
-            >>> results = detector.test_all_checkpoints("model_fold1_epoch*")
-            >>> # Compare which epoch gives best detection count
-        """
-        import glob
-
-        # Find all matching checkpoints
-        pattern = os.path.join(self.checkpoint_dir, checkpoint_pattern + ".pth")
-        checkpoints = sorted(glob.glob(pattern))
-
-        if not checkpoints:
-            logger.warning(f"No checkpoints found matching: {pattern}")
-            return {}
-
-        logger.info(f"\n{'=' * 60}")
-        logger.info(f"TESTING {len(checkpoints)} CHECKPOINTS")
-        logger.info(f"{'=' * 60}\n")
-
-        results = []
-
-        for checkpoint_path in checkpoints:
-            checkpoint_name = os.path.basename(checkpoint_path)
-
-            # Extract epoch number from filename
-            epoch_match = checkpoint_name.split('epoch')[1].split('_')[0]
-            epoch = int(epoch_match)
-
-            logger.info(f"\n--- Testing: {checkpoint_name} ---")
-
-            # Run prediction to custom subdirectory
-            output_subdir = f"epoch{epoch}_test"
-            self.predict(output_subdir=output_subdir, checkpoint_path=checkpoint_path)
-
-            # Count detections in results
-            sequences = get_sequences(self.dataset)
-            total_detections = 0
-            total_images = 0
-
-            for sequence_name, paths in sequences.items():
-                det_file = paths['detections'].parent.parent / f'detections_{output_subdir}' / 'det.txt'
-
-                if det_file.exists():
-                    with open(det_file, 'r') as f:
-                        lines = f.readlines()
-                        total_detections += len(lines)
-
-                    # Count unique images
-                    images = set(line.split(',')[0] for line in lines)
-                    total_images += len(images)
-
-            avg_detections = total_detections / total_images if total_images > 0 else 0
-
-            results.append({
-                'checkpoint': checkpoint_name,
-                'epoch': epoch,
-                'total_detections': total_detections,
-                'total_images': total_images,
-                'avg_per_image': avg_detections
-            })
-
-            logger.info(f"  Total detections: {total_detections}")
-            logger.info(f"  Avg per image: {avg_detections:.1f}")
-
-        # Print summary table
-        logger.info(f"\n{'=' * 60}")
-        logger.info("SUMMARY OF ALL EPOCHS")
-        logger.info(f"{'=' * 60}")
-        logger.info(f"{'Epoch':<8} {'Avg Detections/Image':<25} {'Total Detections':<20}")
-        logger.info("-" * 60)
-
-        for r in results:
-            logger.info(f"{r['epoch']:<8} {r['avg_per_image']:<25.1f} {r['total_detections']:<20}")
-
-        return results
-
     # ================================
     # TRAINING METHODS
     # ================================
-
     def _get_transforms(self):
         """
         Get image transforms for training/inference.
@@ -1173,6 +996,51 @@ class IcebergDetector:
     # ================================
     # INLINE FILTERING METHODS
     # ================================
+    def _load_filter(self):
+        # Load mask and get image dimensions if filtering is enabled
+        mask = None
+        img_width, img_height = None, None
+
+        if self.config.filter_masked_regions or self.config.edge_tolerance > 0:
+            # Get image dimensions from first available sequence
+            sequences = get_sequences(self.dataset)
+            first_seq = next(iter(sequences.values()))
+            first_seq_image_dir = first_seq["images"]
+            image_ext = get_image_ext(first_seq_image_dir)
+            sample_img = [f for f in os.listdir(first_seq_image_dir)
+                          if f.endswith(image_ext)][0]
+            sample_path = os.path.join(first_seq_image_dir, sample_img)
+            img_height, img_width = cv2.imread(sample_path).shape[:2]
+
+            # Load mask if masking is enabled
+            if self.config.filter_masked_regions:
+                mask_file = None
+                mask_dir = os.path.join(DATA_DIR, self.dataset.split("/")[0])
+
+                # Try multiple image extensions
+                for ext in ['.jpg', '.JPG', '.png', '.PNG', '.jpeg', '.JPEG']:
+                    candidate = os.path.join(mask_dir, f"mask{ext}")
+                    if os.path.exists(candidate):
+                        mask_file = candidate
+                        break
+
+                if mask_file is None:
+                    logger.warning(f"Mask file not found in {mask_dir}")
+                else:
+                    # Load mask as binary (True = masked/land, False = valid/water)
+                    mask = cv2.imread(mask_file, cv2.IMREAD_GRAYSCALE).astype(bool)
+                    logger.info(f"Loaded mask: {img_width}x{img_height}")
+                    logger.info(f"Mask filtering enabled (threshold: {self.config.mask_ratio_threshold})")
+
+        # Log active filtering configuration
+        if self.config.edge_tolerance > 0:
+            logger.info(f"Edge filtering enabled (tolerance: {self.config.edge_tolerance}px)")
+        if self.config.min_iceberg_size > 0:
+            logger.info(f"Size filtering enabled (min size: {self.config.min_iceberg_size}px²)")
+        if self.config.confidence_threshold > 0:
+            logger.info(f"Confidence filtering enabled (threshold: {self.config.confidence_threshold})")
+
+        return mask, img_width, img_height
 
     def _is_valid_detection(self, box, score, mask, img_width, img_height):
         """
@@ -1251,114 +1119,107 @@ class IcebergDetector:
 
         return True
 
+    def _remove_nested_detections(self, detections):
+        """
+        Remove nested icebergs that are contained within larger icebergs.
+
+        A small iceberg is considered nested if its intersection ratio with a
+        larger iceberg exceeds the nested_threshold. The intersection ratio is
+        calculated as: (intersection area) / (smaller iceberg area).
+
+        Decision logic:
+        - If larger iceberg has score > score_threshold: Remove nested iceberg
+        - Otherwise: Keep whichever iceberg has higher confidence
+
+        Args:
+            detections (list): List of detection dicts with 'box' and 'score' keys
+                              box format: [x1, y1, x2, y2]
+
+        Returns:
+            list: Filtered detections with nested icebergs removed
+
+        Example:
+            Small iceberg (80×80, score=0.6) is 90% inside large iceberg (200×200, score=0.8)
+            → Large iceberg score > 0.7 → Remove small iceberg
+        """
+        if not detections:
+            return []
+
+        # Sort by confidence score (highest first)
+        detections = sorted(detections, key=lambda x: x['score'], reverse=True)
+        keep = []
+
+        for current in detections:
+            should_keep = True
+            remove_indices = []  # Store integer indices, not detection objects
+
+            for i, kept_det in enumerate(keep):  # ← Added enumerate to get index
+                # Calculate how much of current is inside kept_det
+                intersection_ratio_current = self._calculate_intersection_ratio(
+                    smaller_box=current['box'],
+                    larger_box=kept_det['box']
+                )
+
+                # Calculate how much of kept_det is inside current
+                intersection_ratio_kept = self._calculate_intersection_ratio(
+                    smaller_box=kept_det['box'],
+                    larger_box=current['box']
+                )
+
+                # Case 1: Current is nested within kept_det
+                if intersection_ratio_current >= self.config.nested_threshold:
+                    # If kept detection has high confidence, remove current (nested)
+                    if kept_det['score'] > self.config.nested_threshold:
+                        should_keep = False
+                        break
+                    # Otherwise, since current has lower score (sorted), remove current
+                    else:
+                        should_keep = False
+                        break
+
+                # Case 2: Kept_det is nested within current
+                elif intersection_ratio_kept >= self.config.nested_threshold:
+                    # If current has high confidence, mark kept_det for removal
+                    if current['score'] > self.config.nested_threshold:
+                        remove_indices.append(i)
+                    # Otherwise, remove kept_det (keep the higher scoring one)
+                    else:
+                        remove_indices.append(i)
+
+            # Remove marked detections from keep list (reverse order to maintain indices)
+            for i in sorted(remove_indices, reverse=True):
+                keep.pop(i)
+
+            # Add current if it should be kept
+            if should_keep:
+                keep.append(current)
+
+        return keep
+
     # ================================
     # DETECTION UTILITIES
     # ================================
+    def _get_paths(self, paths, output_subdir):
+        # Override detection path if custom output subdirectory is specified
+        if output_subdir is not None:
+            # Create custom detections directory
+            custom_det_dir = paths['detections'].parent.parent / f'detections_{output_subdir}'
+            custom_det_dir.mkdir(parents=True, exist_ok=True)
+            custom_det_file = custom_det_dir / 'det.txt'
+            paths['detections'] = custom_det_file
+            logger.info(f"Saving detections to: {custom_det_file}")
+        else:
+            # Use default detections directory
+            base_path = str(paths["images"]).split("/images")[0]
+            det_dir = os.path.join(base_path, "detections")
+            os.makedirs(det_dir, exist_ok=True)
 
-    def _calculate_iou(self, box1, box2):
-        """
-        Calculate Intersection over Union (IoU) between two bounding boxes.
+        # Get all image files in sequence
+        image_ext = get_image_ext(paths['images'])
 
-        IoU is a standard metric measuring overlap between bounding boxes.
-        It's the ratio of intersection area to union area.
+        return image_ext
 
-        Args:
-            box1 (list): First bounding box [xmin, ymin, xmax, ymax]
-            box2 (list): Second bounding box [xmin, ymin, xmax, ymax]
-
-        Returns:
-            float: IoU value in [0, 1]
-                - 0.0: No overlap
-                - 1.0: Perfect overlap (identical boxes)
-                - 0.5+: Significant overlap (common NMS threshold)
-
-        Formula:
-            IoU = Intersection Area / Union Area
-                = Intersection Area / (Area1 + Area2 - Intersection Area)
-        """
-        # Find intersection rectangle coordinates
-        x1 = max(box1[0], box2[0])
-        y1 = max(box1[1], box2[1])
-        x2 = min(box1[2], box2[2])
-        y2 = min(box1[3], box2[3])
-
-        # Check if boxes actually intersect
-        if x2 <= x1 or y2 <= y1:
-            return 0.0
-
-        # Calculate areas
-        intersection = (x2 - x1) * (y2 - y1)
-        area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
-        area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
-        union = area1 + area2 - intersection
-
-        return intersection / union if union > 0 else 0.0
-
-    def _calculate_iou_batch(self, boxes1, boxes2):
-        """
-        Calculate IoU between two sets of bounding boxes efficiently.
-
-        Vectorized implementation using numpy broadcasting for computing
-        IoU between all pairs of boxes. Much faster than nested loops.
-
-        Args:
-            boxes1 (np.ndarray): First set of boxes [N, 4] in (x1, y1, x2, y2) format
-            boxes2 (np.ndarray): Second set of boxes [M, 4] in (x1, y1, x2, y2) format
-
-        Returns:
-            np.ndarray: IoU matrix [N, M] where element (i, j) is IoU between
-                       boxes1[i] and boxes2[j]
-        """
-        if len(boxes1) == 0 or len(boxes2) == 0:
-            return np.array([]).reshape(len(boxes1), len(boxes2))
-
-        # Expand dimensions for broadcasting
-        # boxes1: [N, 1, 4], boxes2: [1, M, 4]
-        boxes1 = np.expand_dims(boxes1, axis=1)
-        boxes2 = np.expand_dims(boxes2, axis=0)
-
-        # Calculate intersection coordinates (broadcasts to [N, M, 1])
-        x1 = np.maximum(boxes1[..., 0], boxes2[..., 0])
-        y1 = np.maximum(boxes1[..., 1], boxes2[..., 1])
-        x2 = np.minimum(boxes1[..., 2], boxes2[..., 2])
-        y2 = np.minimum(boxes1[..., 3], boxes2[..., 3])
-
-        # Calculate intersection and union areas
-        intersection = np.maximum(0, x2 - x1) * np.maximum(0, y2 - y1)
-        area1 = (boxes1[..., 2] - boxes1[..., 0]) * (boxes1[..., 3] - boxes1[..., 1])
-        area2 = (boxes2[..., 2] - boxes2[..., 0]) * (boxes2[..., 3] - boxes2[..., 1])
-        union = area1 + area2 - intersection
-
-        # Avoid division by zero
-        return intersection / (union + 1e-6)
-
-    def _calculate_intersection(self, box1, box2):
-        """
-        Calculate intersection area between two bounding boxes.
-
-        Args:
-            box1 (tuple): First bounding box (x1, y1, x2, y2)
-            box2 (tuple): Second bounding box (x1, y1, x2, y2)
-
-        Returns:
-            float: Intersection area in pixels² (0 if no overlap)
-
-        Used for nested detection removal where we need the intersection
-        area directly rather than IoU ratio.
-        """
-        # Find intersection rectangle coordinates
-        x1 = max(box1[0], box2[0])
-        y1 = max(box1[1], box2[1])
-        x2 = min(box1[2], box2[2])
-        y2 = min(box1[3], box2[3])
-
-        # Check if boxes actually intersect
-        if x2 <= x1 or y2 <= y1:
-            return 0.0
-
-        return (x2 - x1) * (y2 - y1)
-
-    def _nms(self, detections, iou_threshold=0.5):
+    def _nms(self, detections):
         """
         Apply Non-Maximum Suppression to remove duplicate detections.
 
@@ -1368,8 +1229,6 @@ class IcebergDetector:
 
         Args:
             detections (list): List of detection dicts with 'box' and 'score' keys
-            iou_threshold (float): IoU threshold for suppression
-                Higher values = more permissive (keep more overlapping boxes)
 
         Returns:
             list: Filtered detections after NMS
@@ -1395,51 +1254,84 @@ class IcebergDetector:
             # Remove highly overlapping detections
             detections = [
                 det for det in detections
-                if self._calculate_iou(best['box'], det['box']) < iou_threshold
+                if calculate_iou(best['box'], det['box']) < self.config.box_nms_thresh
             ]
 
         return keep
 
+    def _calculate_intersection_ratio(self, smaller_box, larger_box):
+        """
+        Calculate what fraction of the smaller box is contained within the larger box.
+
+        This is different from IoU! It measures: intersection / area_of_smaller_box
+
+        Args:
+            smaller_box: [x1, y1, x2, y2] - the potentially nested iceberg
+            larger_box: [x1, y1, x2, y2] - the potentially containing iceberg
+
+        Returns:
+            float: Ratio in [0, 1] representing how much of smaller_box is inside larger_box
+                   1.0 = completely nested, 0.0 = no overlap
+
+        Example:
+            If 80% of a small iceberg is inside a large iceberg, returns 0.8
+        """
+        # Extract coordinates
+        x1_s, y1_s, x2_s, y2_s = smaller_box
+        x1_l, y1_l, x2_l, y2_l = larger_box
+
+        # Calculate intersection rectangle
+        x1_i = max(x1_s, x1_l)
+        y1_i = max(y1_s, y1_l)
+        x2_i = min(x2_s, x2_l)
+        y2_i = min(y2_s, y2_l)
+
+        # Check if there's any intersection
+        if x2_i <= x1_i or y2_i <= y1_i:
+            return 0.0
+
+        # Calculate areas
+        intersection_area = (x2_i - x1_i) * (y2_i - y1_i)
+        smaller_box_area = (x2_s - x1_s) * (y2_s - y1_s)
+
+        # Avoid division by zero
+        if smaller_box_area == 0:
+            return 0.0
+
+        return intersection_area / smaller_box_area
+
     # ================================
     # INFERENCE METHODS WITH INLINE FILTERING
     # ================================
-
-    def _run_multi_scale_prediction(self, img_path, confidence_threshold, mask=None,
-                                    img_width=None, img_height=None):
+    def _run_multi_scale_sliding_window_prediction(self, img_path, mask=None, img_width=None, img_height=None):
         """
-        Run multi-scale detection with inline filtering.
+        Run multi-scale detection with adaptive sliding window strategy for large images.
 
-        Multi-scale detection improves robustness by testing the image at
-        multiple scales. This helps detect objects that might be too small
-        or too large at the original scale.
+        This method implements a hybrid approach that combines multi-scale detection with
+        sliding windows. For each scale, it automatically decides whether to process the
+        entire image directly or use overlapping sliding windows based on image size.
 
         Args:
-            img_path (str): Path to input image
-            confidence_threshold (float): Minimum confidence for detections
-            mask (np.ndarray, optional): Binary mask for filtering
-            img_width (int, optional): Image width for filtering
-            img_height (int, optional): Image height for filtering
+            img_path (str or Path): Path to the input image file
+            mask (np.ndarray, optional): Binary mask for filtering detections.
+                Detections outside the mask are discarded. Shape: (height, width)
+            img_width (int, optional): Width for coordinate validation.
+                Defaults to original image width if not provided.
+            img_height (int, optional): Height for coordinate validation.
+                Defaults to original image height if not provided.
 
         Returns:
-            list: Valid detections in standardized format [x, y, width, height]
-
-        Process:
-            1. For each scale factor:
-               a. Resize image
-               b. Run detection
-               c. Scale boxes back to original size
-               d. Apply inline filtering
-            2. Apply NMS to remove cross-scale duplicates
-            3. Return filtered detections
-
-        The inline filtering ensures only valid detections are kept
-        before the expensive NMS operation.
+            list: Final detections after NMS and nested removal. Each detection is a dict:
+                {
+                    'box': np.ndarray,      # [x1, y1, x2, y2] in original image coordinates
+                    'score': float,         # Confidence score [0, 1]
+                    'label': int,          # Class label (added by _convert_to_detection_format)
+                    'image_path': str      # Source image path (added by _convert_to_detection_format)
+                }
         """
-        # Load and prepare image
         original_img = Image.open(img_path).convert("RGB")
         original_size = original_img.size
 
-        # Get image dimensions
         if img_width is None or img_height is None:
             img_width, img_height = original_size
 
@@ -1450,343 +1342,84 @@ class IcebergDetector:
             # Resize image
             new_size = (int(original_size[0] * scale), int(original_size[1] * scale))
             scaled_img = original_img.resize(new_size, Image.LANCZOS)
-            img_tensor = self._get_transforms()(scaled_img).unsqueeze(0).to(self.device)
 
-            # Run detection
-            with torch.no_grad():
-                predictions = self.model(img_tensor)
+            # Decide: direct processing or sliding window?
+            max_dim = max(new_size)
+            use_windows = max_dim > self.config.window_size[0]
 
-            boxes = predictions[0]['boxes'].cpu().numpy()
-            scores = predictions[0]['scores'].cpu().numpy()
+            if use_windows:
+                # ===== LARGE IMAGE: USE SLIDING WINDOWS =====
+                img_array = np.array(scaled_img)
+                h, w = img_array.shape[:2]
+                window_size = self.config.window_size
+                overlap = self.config.overlap
 
-            if len(boxes) > 0:
-                # Scale boxes back to original image size
-                boxes[:, [0, 2]] /= scale
-                boxes[:, [1, 3]] /= scale
+                step_x = int(window_size[0] * (1 - overlap))
+                step_y = int(window_size[1] * (1 - overlap))
 
-                # Apply ALL filters immediately - only keep valid detections
-                for box, score in zip(boxes, scores):
-                    if self._is_valid_detection(box, score, mask, img_width, img_height):
-                        scale_detections.append({
-                            'box': box,
-                            'score': score,
-                            'method': 'multi_scale'
-                        })
+                # Ensure we cover the entire image
+                for y in range(0, h, step_y):
+                    if y + window_size[1] > h:
+                        y = h - window_size[1]  # Snap to edge
 
-        # NMS only on valid detections (much smaller set!)
-        if scale_detections:
-            merged = self._nms(scale_detections, iou_threshold=0.5)
-            return self._convert_to_detection_format(merged)
-        return []
+                    for x in range(0, w, step_x):
+                        if x + window_size[0] > w:
+                            x = w - window_size[0]  # Snap to edge
 
-    def _run_sliding_window_prediction(self, img_path, confidence_threshold, mask=None,
-                                       img_width=None, img_height=None):
-        """
-        Run sliding window detection with inline filtering.
+                        # Extract window
+                        window = img_array[y:y + window_size[1], x:x + window_size[0]]
+                        window_pil = Image.fromarray(window)
+                        window_tensor = self._get_transforms()(window_pil).unsqueeze(0).to(self.device)
 
-        Sliding window detection processes large images by breaking them into
-        overlapping windows. This is essential for high-resolution imagery
-        where full-image processing would be too memory-intensive.
+                        # Run detection on window
+                        with torch.no_grad():
+                            predictions = self.model(window_tensor)
 
-        Args:
-            img_path (str): Path to input image
-            confidence_threshold (float): Minimum confidence for detections
-            mask (np.ndarray, optional): Binary mask for filtering
-            img_width (int, optional): Image width for filtering
-            img_height (int, optional): Image height for filtering
+                        boxes = predictions[0]['boxes'].cpu().numpy()
+                        scores = predictions[0]['scores'].cpu().numpy()
 
-        Returns:
-            list: Valid detections in standardized format [x, y, width, height]
+                        if len(boxes) > 0:
+                            # Translate to scaled image coordinates
+                            boxes[:, [0, 2]] += x
+                            boxes[:, [1, 3]] += y
 
-        Process:
-            1. Slide window across image with overlap
-            2. For each window:
-               a. Extract window region
-               b. Run detection
-               c. Convert to global coordinates
-               d. Apply inline filtering
-            3. Apply NMS to remove overlaps
-            4. Return filtered detections
+                            # Scale back to original image size
+                            boxes[:, [0, 2]] /= scale
+                            boxes[:, [1, 3]] /= scale
 
-        The overlap between windows ensures objects near window boundaries
-        are still detected. Inline filtering reduces the number of
-        detections that need NMS processing.
-        """
-        # Load image
-        img = cv2.imread(img_path)
-        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        h, w = img_rgb.shape[:2]
+                            # Apply filters
+                            for box, score in zip(boxes, scores):
+                                if self._is_valid_detection(box, score, mask, img_width, img_height):
+                                    scale_detections.append({
+                                        'box': box,
+                                        'score': score,
+                                    })
+            else:
+                # ===== SMALL IMAGE: PROCESS DIRECTLY =====
+                img_tensor = self._get_transforms()(scaled_img).unsqueeze(0).to(self.device)
 
-        # Get image dimensions
-        if img_width is None or img_height is None:
-            img_width, img_height = w, h
-
-        window_detections = []
-        window_size = self.config.window_size
-        overlap = self.config.overlap
-
-        # Calculate step sizes based on overlap
-        step_x = int(window_size[0] * (1 - overlap))
-        step_y = int(window_size[1] * (1 - overlap))
-
-        # Slide window across image
-        for y in range(0, h - window_size[1] + 1, step_y):
-            for x in range(0, w - window_size[0] + 1, step_x):
-                # Extract window
-                window = img_rgb[y:y + window_size[1], x:x + window_size[0]]
-                window_pil = Image.fromarray(window)
-                window_tensor = self._get_transforms()(window_pil).unsqueeze(0).to(self.device)
-
-                # Run detection on window
                 with torch.no_grad():
-                    predictions = self.model(window_tensor)
+                    predictions = self.model(img_tensor)
 
                 boxes = predictions[0]['boxes'].cpu().numpy()
                 scores = predictions[0]['scores'].cpu().numpy()
 
-                # Convert to global coordinates and filter immediately
-                for box, score in zip(boxes, scores):
-                    # Convert from window coordinates to global image coordinates
-                    global_box = np.array([box[0] + x, box[1] + y, box[2] + x, box[3] + y])
+                if len(boxes) > 0:
+                    # Scale boxes back to original size
+                    boxes[:, [0, 2]] /= scale
+                    boxes[:, [1, 3]] /= scale
 
-                    # Apply ALL filters immediately
-                    if self._is_valid_detection(global_box, score, mask, img_width, img_height):
-                        window_detections.append({
-                            'box': global_box,
-                            'score': score,
-                            'method': 'sliding_window'
-                        })
+                    for box, score in zip(boxes, scores):
+                        if self._is_valid_detection(box, score, mask, img_width, img_height):
+                            scale_detections.append({
+                                'box': box,
+                                'score': score,
+                            })
 
-        # NMS only on valid detections
-        if window_detections:
-            merged = self._nms(window_detections, iou_threshold=0.5)
-            return self._convert_to_detection_format(merged)
-        return []
-
-    def _remove_overlaps(self, multi_scale_dets, sliding_window_dets, iou_threshold):
-        """
-        Intelligently combine detections from both methods with priority rules.
-
-        When combining multi-scale and sliding window detections, we need to
-        handle overlaps intelligently. This method implements smart priority
-        rules to keep the best detections from each method.
-
-        Args:
-            multi_scale_dets (list): Detections from multi-scale method
-            sliding_window_dets (list): Detections from sliding window method
-            iou_threshold (float): IoU threshold for considering boxes as overlapping
-
-        Returns:
-            list: Final combined and filtered detections
-
-        Priority Rules:
-            1. Multi-scale detections have priority (generally better quality)
-            2. Among sliding window detections, larger boxes win
-            3. Non-overlapping detections from both methods are kept
-
-        This approach ensures we get comprehensive coverage while
-        removing redundant detections intelligently.
-        """
-        # Start with all multi-scale detections (they have priority)
-        final_detections = multi_scale_dets.copy()
-
-        # Convert multi-scale detections to box array for efficient comparison
-        ms_boxes = []
-        if multi_scale_dets:
-            ms_boxes = np.array([[d['x'], d['y'], d['x'] + d['width'], d['y'] + d['height']]
-                                 for d in multi_scale_dets])
-
-        # Process each sliding window detection
-        for sw_det in sliding_window_dets:
-            sw_box = np.array([sw_det['x'], sw_det['y'],
-                               sw_det['x'] + sw_det['width'], sw_det['y'] + sw_det['height']])
-
-            should_keep = True
-
-            # Check overlap with multi-scale detections (multi-scale wins)
-            if len(ms_boxes) > 0:
-                ious = self._calculate_iou_batch(sw_box.reshape(1, -1), ms_boxes)[0]
-                if np.any(ious > iou_threshold):
-                    should_keep = False
-
-            # Check overlap with already accepted sliding window detections
-            if should_keep and len(final_detections) > len(multi_scale_dets):
-                # Build list of already accepted sliding window boxes
-                accepted_sw_boxes = []
-                for det in final_detections[len(multi_scale_dets):]:
-                    box = np.array([det['x'], det['y'], det['x'] + det['width'], det['y'] + det['height']])
-                    accepted_sw_boxes.append(box)
-
-                if accepted_sw_boxes:
-                    accepted_sw_boxes = np.array(accepted_sw_boxes)
-                    ious = self._calculate_iou_batch(sw_box.reshape(1, -1), accepted_sw_boxes)[0]
-                    overlap_indices = np.where(ious > iou_threshold)[0]
-
-                    if len(overlap_indices) > 0:
-                        # Compare areas - larger bounding box wins
-                        sw_area = sw_det['width'] * sw_det['height']
-
-                        # Check if current detection is larger than all overlapping ones
-                        larger_than_all = True
-                        indices_to_remove = []
-
-                        for ov_idx in overlap_indices:
-                            existing_det = final_detections[len(multi_scale_dets) + ov_idx]
-                            existing_area = existing_det['width'] * existing_det['height']
-
-                            if sw_area <= existing_area:
-                                # Current detection is not larger, don't keep it
-                                larger_than_all = False
-                                break
-                            else:
-                                # Current detection is larger, mark smaller one for removal
-                                indices_to_remove.append(len(multi_scale_dets) + ov_idx)
-
-                        if larger_than_all:
-                            # Remove smaller overlapping detections
-                            for idx in sorted(indices_to_remove, reverse=True):
-                                final_detections.pop(idx)
-                        else:
-                            should_keep = False
-
-            # Add detection if it passed all filters
-            if should_keep:
-                final_detections.append(sw_det)
-
-        return final_detections
-
-    def _remove_nested_detections(self, detection_path):
-        """
-        Remove detections that are fully enclosed within larger detections.
-
-        Sometimes the model detects both a large iceberg and smaller fragments
-        or pieces within it. This method removes nested detections to clean
-        up the results, keeping only the larger parent detection.
-
-        Special Case:
-            If a smaller nested detection has significantly higher confidence
-            (>0.5) than the larger box (<0.5), we keep the smaller box instead.
-            This handles cases where the model is more confident about a
-            fragment than the whole iceberg.
-
-        Args:
-            detection_path (str): Path to detection file to clean
-
-        Returns:
-            int: Number of detections removed
-
-        Process:
-            1. Load detections and group by frame
-            2. For each frame:
-               a. Sort detections by area (largest first)
-               b. Check each detection against larger ones
-               c. Remove if nested (with confidence exception)
-            3. Save cleaned detections
-
-        Threshold:
-            A detection is considered nested if ≥95% of its area overlaps
-            with a larger detection.
-        """
-        # Load detections grouped by frame
-        detections_by_frame = load_icebergs_by_frame(detection_path)
-
-        # Process each frame independently
-        all_filtered_detections = []
-        pre_detections_count = 0
-
-        for frame_id, frame_detections in detections_by_frame.items():
-            # Convert to comparable format and calculate areas
-            pre_detections_count += len(frame_detections)
-            boxes_data = []
-
-            for object_id in frame_detections:
-                det = frame_detections[object_id]
-                x, y, width, height = det["bbox"]
-
-                boxes_data.append({
-                    'image': frame_id,
-                    'object_id': object_id,
-                    'x': x,
-                    'y': y,
-                    'width': width,
-                    'height': height,
-                    'x2': x + width,
-                    'y2': y + height,
-                    'score': det['conf'],
-                    'area': width * height,
-                    'keep': True  # Initialize as keep=True
-                })
-
-            # Sort by area (largest first) - ensures we process large boxes before small
-            boxes_data.sort(key=lambda x: x['area'], reverse=True)
-
-            # Track kept detections with their properties
-            kept_boxes = []
-
-            # Check each detection against already kept (larger) ones
-            for current_idx, item in enumerate(boxes_data):
-                # Skip if already marked as not keep
-                if not item['keep']:
-                    continue
-
-                current_box = item["x"], item["y"], item["x2"], item["y2"]
-                current_area = item['area']
-                current_conf = item['score']
-                is_nested = False
-
-                # Only check if confidence is not very high
-                if current_conf < 0.95:
-                    # Check against all kept boxes (which are all larger)
-                    for kept_idx, (kept_box, kept_area, kept_conf) in enumerate(kept_boxes):
-                        # Calculate intersection
-                        intersection = self._calculate_intersection(current_box, kept_box)
-
-                        # Check if most of the current (smaller) box is inside the kept (larger) box
-                        coverage = intersection / current_area if current_area > 0 else 0.0
-
-                        if coverage >= self.config.max_iceberg_overlap:
-                            # Found a nested detection
-                            # Special case: smaller box has high confidence, larger box has low confidence
-                            if kept_conf < 0.5 and current_conf > 0.5:
-                                # Keep current (smaller) box, remove kept (larger) box
-                                # Find the kept box in boxes_data and mark it as not keep
-                                for box in boxes_data:
-                                    box_tuple = (box['x'], box['y'], box['x2'], box['y2'])
-                                    if box_tuple == kept_box and box['area'] == kept_area:
-                                        box['keep'] = False
-                                        break
-
-                                # Remove from kept_boxes list
-                                kept_boxes.pop(kept_idx)
-                                # Don't mark current as nested
-                                is_nested = False
-                            else:
-                                # Normal case: remove the smaller nested box
-                                is_nested = True
-
-                            break
-
-                if not is_nested:
-                    kept_boxes.append((current_box, item['area'], item['score']))
-                else:
-                    item['keep'] = False
-
-            # Add kept detections from this frame
-            frame_filtered = [item for item in boxes_data if item['keep']]
-            all_filtered_detections.extend(frame_filtered)
-
-        # Sort by original index to maintain input order
-        all_filtered_detections.sort(key=lambda x: x['object_id'])
-
-        # Log overall statistics
-        total_removed = pre_detections_count - len(all_filtered_detections)
-        if total_removed > 0:
-            logger.info(f"\nTotal removed across all frames: {total_removed} nested detections "
-                        f"({total_removed / pre_detections_count * 100:.1f}%)")
-
-        # Save cleaned detections
-        self._save_detections(all_filtered_detections, detection_path)
-        return total_removed
+        # NMS on all detections from all scales
+        merged = self._nms(scale_detections)
+        merged = self._remove_nested_detections(merged)
+        return self._convert_to_detection_format(merged)
 
     def _convert_to_detection_format(self, detections):
         """
