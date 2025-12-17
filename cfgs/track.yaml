@@ -10,13 +10,12 @@ bidirectional_matching: True
 
 # Threshold configurations
 thresholds: {
-    "appearance": 0.30,
-    "distance": 100,
-    "size": 0.30,
-    "match_score": 0.50
+    "appearance": 0.3796,
+    "distance": 99.18,
+    "size": 0.2933,
 }
-threshold_tolerance_factor: 0.5
-get_gt_thresholds: True
+threshold_tolerance: 0.3
+get_gt_thresholds: False
 gt_thresholds: "hill/train"
 
 # Weight configuration
@@ -26,13 +25,10 @@ weight_distance: 0.60
 
 # Track management
 max_age: 3
-min_iceberg_id_count: 2
+min_iceberg_id_count: 1
 min_iceberg_size: 0.0
 
 # Kalman filter parameters
-process_noise: 15.0
-measurement_noise: 15.0
+process_noise: 10.0
+measurement_noise: 18.0
 kalman_distance_weight: 0.7
-
-# Device configuration
-device: null
