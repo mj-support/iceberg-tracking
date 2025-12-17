@@ -1,7 +1,7 @@
 from detection import IcebergDetector
 from embedding import IcebergEmbeddingsTrainer
 from tracking import IcebergTracker
-from utils.eval import filter_tracking_to_gt
+from utils.eval import eval_tracking
 from utils.visualize import Visualizer
 from utils.helpers import parse_cli_args, load_config
 
@@ -20,7 +20,7 @@ Commands:
     train-detection    Train Faster R-CNN detection model
     detect             Run iceberg detection on images
     track              Run multi-object tracking
-    eval               Prepare evaluation of tracking results against ground truth
+    eval               Evaluate tracking results
     visualize          Create annotated images and videos
 
 Examples:
@@ -77,7 +77,7 @@ def main():
     elif cmd == 'eval':
         # Evaluate tracking against ground truth
         config = load_config(cfg_file, **overrides)
-        filter_tracking_to_gt(config)
+        eval_tracking(config)
 
     elif cmd == 'visualize':
         # Create annotated images and videos
