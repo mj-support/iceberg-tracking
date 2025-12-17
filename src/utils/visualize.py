@@ -27,7 +27,7 @@ annotated images and videos for analysis, validation and presentation purposes.
 It supports multiple annotation sources and flexible rendering options.
 
 Key Features:
-    1. Multi-Source Annotation Support (Ground truth, detections, tracking)
+    1. Multi-Source Annotation Support (Ground truth, detections, tracking, eval)
     2. Flexible Visualization Options (bounding boxes, IDs, contours, masks)
     3. Video Generation
     4. Advanced Segmentation
@@ -64,6 +64,7 @@ class VisualizationConfig:
                 - "tracking": Complete tracking results (default)
                 - "detections": Raw detector outputs
                 - "ground_truth": Manual annotations
+                - "eval": Evaluation results
             Default: "tracking"
 
         start_index (int): Starting frame index for processing. Default: 0 (start from beginning)
@@ -171,7 +172,7 @@ class Visualizer:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
         # Validate annotation source
-        valid_sources = ["ground_truth", "detections", "tracking"]
+        valid_sources = ["ground_truth", "detections", "tracking", "eval"]
         if self.annotation_source not in valid_sources:
             raise ValueError(
                 f"Invalid annotation source '{self.annotation_source}'. "

@@ -650,8 +650,8 @@ def get_sequences(dataset):
         tracking_file = sequence_dir / 'tracking' / 'track.txt'
         sequence['tracking'] = tracking_file
 
-        tracking_eval_file = sequence_dir / 'tracking' / 'track_eval.txt'
-        sequence['track_eval'] = tracking_eval_file
+        tracking_eval_file = sequence_dir / 'tracking' / 'eval.txt'
+        sequence['eval'] = tracking_eval_file
 
         track_embeddings_file = sequence_dir / 'tracking' / 'embeddings.pt'
         sequence['track_embeddings'] = track_embeddings_file

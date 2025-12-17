@@ -2,7 +2,7 @@
 dataset: null   # Required field
 
 # General configurations
-annotation_source: tracking  # Options: tracking, detections, ground_truth
+annotation_source: tracking  # Options: tracking, detections, ground_truth, eval
 start_index: 0
 seq_length_limit: null
 show_images: False
