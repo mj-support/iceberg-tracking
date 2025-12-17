@@ -67,7 +67,7 @@ class EvalConfig:
 
         2. Match tracking to GT (filters tracking results):
            >>> match_tracking_to_gt(config)
-           # Creates: dataset/tracking/track_eval.txt
+           # Creates: dataset/tracking/eval.txt
 
         3. Compute metrics:
            >>> metrics = calc_metrics(config)
@@ -155,7 +155,7 @@ def calc_metrics(config: EvalConfig):
 
         # Load data
         gt_by_frame = load_icebergs_by_frame(paths["ground_truth"])
-        track_by_frame = load_icebergs_by_frame(paths["track_eval"])
+        track_by_frame = load_icebergs_by_frame(paths["eval"])
 
         metrics = compute_sequence_metrics(gt_by_frame, track_by_frame, config.iou_threshold)
         all_metrics[sequence_name] = metrics
@@ -652,7 +652,7 @@ def eval_tracking(config: EvalConfig):
            - Load ground truth and tracking results
            - Perform frame-by-frame greedy IoU matching
            - Filter tracking to only GT-matched detections
-           - Save filtered results to track_eval.txt
+           - Save filtered results to eval.txt
 
         2. calc_metrics(config):
            - Load ground truth and filtered tracking
@@ -713,7 +713,7 @@ def match_tracking_to_gt(config: EvalConfig):
                 2. If IoU ≥ threshold: Keep this tracking detection
                 3. Otherwise: GT is unmatched (will count as FN in metrics)
 
-        Save all matched tracking detections to track_eval.txt
+        Save all matched tracking detections to eval.txt
 
     Args:
         config (EvalConfig): Configuration with dataset path and IoU threshold
@@ -777,7 +777,7 @@ def match_tracking_to_gt(config: EvalConfig):
             gt_matches.append(frame_gt_matches)
 
         # Write to file in MOTChallenge format
-        with open(paths["track_eval"], 'w') as f:
+        with open(paths["eval"], 'w') as f:
             for frame_matches in gt_matches:
                 for match in frame_matches:
                     x, y, w, h = match['bbox']
@@ -788,7 +788,7 @@ def match_tracking_to_gt(config: EvalConfig):
                     )
 
         # Sort by frame number for easier analysis
-        sort_file(paths["track_eval"])
+        sort_file(paths["eval"])
 
-        logger.info(f"✓ Filtered tracking saved to: {paths['track_eval']}")
+        logger.info(f"✓ Filtered tracking saved to: {paths['eval']}")
         logger.info("")  # Empty line for readability
