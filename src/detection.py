@@ -155,7 +155,7 @@ class IcebergDetectionConfig:
     # Model parameters - Define Faster R-CNN architecture
     num_classes: int = 2  # Background + iceberg
     anchor_sizes: Tuple[Tuple[int, ...], ...] = ((16,), (32,), (64,), (128,), (256,))
-    anchor_aspect_ratios: Tuple[Tuple[float, ...], ...] = ((0.4, 0.5, 0.7),) * 5
+    anchor_aspect_ratios: Tuple[Tuple[float, ...], ...] = ((0.4, 0.6, 0.8),) * 5
 
     # Training parameters - Control optimization process
     k_folds: int = 5
