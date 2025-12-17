@@ -5,7 +5,7 @@ num_workers: 4
 # Model parameters - Define Faster R-CNN architecture
 num_classes: 2  # Background + iceberg
 anchor_sizes: [[16], [32], [64], [128], [256]]
-anchor_aspect_ratios: [[0.5, 1.0, 2.0], [0.5, 1.0, 2.0], [0.5, 1.0, 2.0], [0.5, 1.0, 2.0], [0.5, 1.0, 2.0]]
+anchor_aspect_ratios: [[0.4, 0.6, 0.8], [0.4, 0.6, 0.8], [0.4, 0.6, 0.8], [0.4, 0.6, 0.8], [0.4, 0.6, 0.8]]
 
 # Training parameters - Control optimization process
 k_folds: 5
@@ -16,26 +16,24 @@ momentum: 0.9
 weight_decay: 0.0005
 
 # Detection parameters - Control model inference behavior
-box_detections_per_img: 1000
-box_nms_thresh: 0.3
-rpn_nms_thresh: 0.5
-rpn_score_thresh: 0.0
+box_detections_per_img: 5000
+box_nms_thresh: 0.5
+rpn_nms_thresh: 0.7
 
 # Inference parameters - Control prediction pipeline
 confidence_threshold: 0.1
-scales: [0.5, 1.0, 1.5, 2.0]
-window_size: [1024, 1024]
-overlap: 0.2
-iou_threshold: 0.3
+scales: [0.5, 1]
+window_size: [1536, 1536]
+overlap: 0.35
 
 # Postprocessing parameters - Applied inline during inference
 postprocess: True
-generate_embeddings: True
+generate_embeddings: False
 edge_tolerance: 0
-mask_ratio_threshold: 0.02
+mask_ratio_threshold: 0.1
 filter_masked_regions: True
 min_iceberg_size: 0.0
-max_iceberg_overlap: 0.5
+nested_threshold: 0.7
 
 # Training checkpoints
 save_checkpoints: False
