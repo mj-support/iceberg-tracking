@@ -28,12 +28,11 @@ overlap: 0.35
 
 # Postprocessing parameters - Applied inline during inference
 postprocess: True
-generate_embeddings: False
+generate_embeddings: True
 edge_tolerance: 0
 mask_ratio_threshold: 0.1
 filter_masked_regions: True
 min_iceberg_size: 0.0
-nested_threshold: 0.7
 
 # Training checkpoints
 save_checkpoints: False

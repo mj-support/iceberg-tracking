@@ -129,7 +129,6 @@ class IcebergDetectionConfig:
         edge_tolerance (int): Minimum distance from image edge (pixels)
         mask_ratio_threshold (float): Maximum fraction of detection that can be masked
         min_iceberg_size (float): Minimum bounding box area (pixels²)
-        nested_threshold (float): Maximum IoU for nested detection removal
 
         # Training Checkpoints
         save_checkpoints (bool): Save model weights after each epoch
@@ -183,7 +182,6 @@ class IcebergDetectionConfig:
     mask_ratio_threshold: float = 0.1
     filter_masked_regions: bool = True
     min_iceberg_size: float = 0.0
-    nested_threshold: float = 0.7
 
     # Training checkpoints
     save_checkpoints: bool = False
@@ -1123,13 +1121,11 @@ class IcebergDetector:
         """
         Remove nested icebergs that are contained within larger icebergs.
 
-        A small iceberg is considered nested if its intersection ratio with a
-        larger iceberg exceeds the nested_threshold. The intersection ratio is
-        calculated as: (intersection area) / (smaller iceberg area).
-
         Decision logic:
-        - If larger iceberg has score > score_threshold: Remove nested iceberg
-        - Otherwise: Keep whichever iceberg has higher confidence
+        - High-confidence icebergs (score > score_threshold) are always kept
+        - If a low-confidence iceberg contains a high-confidence nested iceberg,
+          remove the low-confidence one
+        - Among low-confidence icebergs, remove the one with lower score if nested
 
         Args:
             detections (list): List of detection dicts with 'box' and 'score' keys
@@ -1137,10 +1133,6 @@ class IcebergDetector:
 
         Returns:
             list: Filtered detections with nested icebergs removed
-
-        Example:
-            Small iceberg (80×80, score=0.6) is 90% inside large iceberg (200×200, score=0.8)
-            → Large iceberg score > 0.7 → Remove small iceberg
         """
         if not detections:
             return []
@@ -1150,47 +1142,56 @@ class IcebergDetector:
         keep = []
 
         for current in detections:
+            is_high_confidence = current['score'] > self.config.box_nms_thresh
             should_keep = True
-            remove_indices = []  # Store integer indices, not detection objects
+            remove_indices = []
 
-            for i, kept_det in enumerate(keep):  # ← Added enumerate to get index
-                # Calculate how much of current is inside kept_det
-                intersection_ratio_current = self._calculate_intersection_ratio(
+            for i, kept_det in enumerate(keep):
+                kept_is_high_confidence = kept_det['score'] > self.config.box_nms_thresh
+
+                # Calculate intersection ratios in both directions
+                current_in_kept = self._calculate_intersection_ratio(
                     smaller_box=current['box'],
                     larger_box=kept_det['box']
                 )
 
-                # Calculate how much of kept_det is inside current
-                intersection_ratio_kept = self._calculate_intersection_ratio(
+                kept_in_current = self._calculate_intersection_ratio(
                     smaller_box=kept_det['box'],
                     larger_box=current['box']
                 )
 
-                # Case 1: Current is nested within kept_det
-                if intersection_ratio_current >= self.config.nested_threshold:
-                    # If kept detection has high confidence, remove current (nested)
-                    if kept_det['score'] > self.config.nested_threshold:
+                # Case 1: Current is nested in kept_det
+                if current_in_kept >= self.config.box_nms_thresh:
+                    # If kept is high-confidence, current loses (regardless of current's score)
+                    if kept_is_high_confidence:
                         should_keep = False
                         break
-                    # Otherwise, since current has lower score (sorted), remove current
+                    # If kept is low-confidence and current is high-confidence, kept loses
+                    elif is_high_confidence:
+                        remove_indices.append(i)
+                    # Both low-confidence: current loses (kept has higher score due to sorting)
                     else:
                         should_keep = False
                         break
 
-                # Case 2: Kept_det is nested within current
-                elif intersection_ratio_kept >= self.config.nested_threshold:
-                    # If current has high confidence, mark kept_det for removal
-                    if current['score'] > self.config.nested_threshold:
+                # Case 2: Kept_det is nested in current
+                elif kept_in_current >= self.config.box_nms_thresh:
+                    # If current is high-confidence, kept loses (regardless of kept's score)
+                    if is_high_confidence:
                         remove_indices.append(i)
-                    # Otherwise, remove kept_det (keep the higher scoring one)
+                    # If current is low-confidence and kept is high-confidence, current loses
+                    elif kept_is_high_confidence:
+                        should_keep = False
+                        break
+                    # Both low-confidence: kept wins (has higher score due to sorting)
                     else:
-                        remove_indices.append(i)
+                        should_keep = False
+                        break
 
-            # Remove marked detections from keep list (reverse order to maintain indices)
+            # Remove marked detections
             for i in sorted(remove_indices, reverse=True):
                 keep.pop(i)
 
-            # Add current if it should be kept
             if should_keep:
                 keep.append(current)
 
