@@ -128,9 +128,9 @@ class IcebergTrackingConfig:
 
     # Threshold configuration
     thresholds: dict = field(default_factory=lambda: {
-        "appearance": 0.3796,
+        "appearance": 0.4764,
         "distance": 99.18,
-        "size": 0.2933,
+        "size": 0.3143,
     })
     threshold_tolerance: float = 0.3
     get_gt_thresholds: bool = False
@@ -899,6 +899,14 @@ class IcebergTracker:
                 # Normalize distance to [0, 1] (1 = close, 0 = far)
                 distance_norm = 1 - min_max_normalize(
                     distance, 0, self.thresholds['distance']
+                )
+
+                size_similarity = min_max_normalize(
+                    size_similarity, self.thresholds['size'], 1.0
+                )
+
+                appearance_similarity = min_max_normalize(
+                    appearance_similarity, self.thresholds['appearance'], 1.0
                 )
 
                 # Compute weighted score with configured weights

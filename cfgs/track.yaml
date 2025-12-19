@@ -10,18 +10,18 @@ bidirectional_matching: True
 
 # Threshold configurations
 thresholds: {
-    "appearance": 0.3796,
+    "appearance": 0.4764,
     "distance": 99.18,
-    "size": 0.2933,
+    "size": 0.3143,
 }
 threshold_tolerance: 0.3
-get_gt_thresholds: False
+get_gt_thresholds: True
 gt_thresholds: "hill/train"
 
 # Weight configuration
-weight_appearance: 0.35
+weight_appearance: 0.3
 weight_size: 0.05
-weight_distance: 0.60
+weight_distance: 0.65
 
 # Track management
 max_age: 3
