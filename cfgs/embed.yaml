@@ -21,7 +21,7 @@ val_batch_size: 32
 learning_rate: 1e-4
 weight_decay: 1e-4
 num_epochs: 50
-patience: 8
+patience: 5
 min_delta: 0.002
 
 # Loss configuration
