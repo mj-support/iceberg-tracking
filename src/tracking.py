@@ -137,9 +137,9 @@ class IcebergTrackingConfig:
     gt_thresholds: str = "hill/train"
 
     # Weight configuration
-    weight_appearance: float = 0.35
-    weight_size: float = 0.05
-    weight_distance: float = 0.60
+    weight_appearance: float = 0.2
+    weight_size: float = 0.1
+    weight_distance: float = 0.70
 
     # Track management
     max_age: int = 3

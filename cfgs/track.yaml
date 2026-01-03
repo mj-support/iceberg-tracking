@@ -15,13 +15,13 @@ thresholds: {
     "size": 0.3143,
 }
 threshold_tolerance: 0.3
-get_gt_thresholds: True
+get_gt_thresholds: False
 gt_thresholds: "hill/train"
 
 # Weight configuration
-weight_appearance: 0.3
-weight_size: 0.05
-weight_distance: 0.65
+weight_appearance: 0.2
+weight_size: 0.1
+weight_distance: 0.7
 
 # Track management
 max_age: 3
