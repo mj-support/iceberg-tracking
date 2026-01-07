@@ -20,8 +20,9 @@ gt_thresholds: "hill/train"
 
 # Weight configuration
 weight_appearance: 0.2
+weight_euclidean_distance: 0.2
+weight_kalman_distance: 0.5
 weight_size: 0.1
-weight_distance: 0.7
 
 # Track management
 max_age: 3
@@ -31,4 +32,3 @@ min_iceberg_size: 0.0
 # Kalman filter parameters
 process_noise: 10.0
 measurement_noise: 18.0
-kalman_distance_weight: 0.7

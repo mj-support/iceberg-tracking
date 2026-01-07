@@ -332,8 +332,8 @@ def get_size_similarity(iceberg_a, iceberg_b):
     return ratio
 
 
-def get_score(appearance_similarity, distance_similarity, size_similarity,
-              appearance_weight=1, distance_weight=1, size_weight=1):
+def get_score(appearance_similarity, eucl_distance_similarity, kalman_distance_similarity, size_similarity,
+              appearance_weight=0.2, eucl_distance_weight=0.2, kalman_distance_weight=0.5, size_weight=0.1):
     """
     Compute weighted combined similarity score from multiple features.
 
@@ -349,10 +349,11 @@ def get_score(appearance_similarity, distance_similarity, size_similarity,
         float: Combined similarity score in [0, 1] where 1 = perfect match
     """
     # Calculate weighted average of all similarity components
-    total_weight = appearance_weight + distance_weight + size_weight
+    total_weight = appearance_weight + eucl_distance_weight + kalman_distance_weight + size_weight
     score = (
                     appearance_similarity * appearance_weight +
-                    distance_similarity * distance_weight +
+                    eucl_distance_similarity * eucl_distance_weight +
+                    kalman_distance_similarity * kalman_distance_weight +
                     size_similarity * size_weight
             ) / total_weight
     return score

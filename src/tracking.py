@@ -96,8 +96,9 @@ class IcebergTrackingConfig:
 
         # Weight Configuration (relative importance)
         weight_appearance (float): Weight for appearance similarity
+        weight_euclidean_distance (float): Weight for euclidean distance similarity
+        weight_kalman_distance (float): Weight for kalman distance similarity
         weight_size (float): Weight for size similarity
-        weight_distance (float): Weight for distance similarity
 
         # Track Management Configuration
         max_age (int): Max frames a track can be unmatched before deletion
@@ -107,7 +108,6 @@ class IcebergTrackingConfig:
         # Kalman Filter Parameters
         process_noise (float): Motion model uncertainty (pixels)
         measurement_noise (float): Detection uncertainty (pixels)
-        kalman_distance_weight (float): Blend predicted vs last position [0, 1]
 
     Example Configurations:
         >>> config = IcebergTrackingConfig(
@@ -138,8 +138,9 @@ class IcebergTrackingConfig:
 
     # Weight configuration
     weight_appearance: float = 0.2
+    weight_euclidean_distance: float = 0.2
+    weight_kalman_distance: float = 0.5
     weight_size: float = 0.1
-    weight_distance: float = 0.70
 
     # Track management
     max_age: int = 3
@@ -149,7 +150,6 @@ class IcebergTrackingConfig:
     # Kalman filter parameters
     process_noise: float = 10.0
     measurement_noise: float = 18.0
-    kalman_distance_weight: float = 0.7
 
 # ============================================================================
 # TRACK REPRESENTATION
@@ -652,9 +652,10 @@ class IcebergTracker:
         logger.info(f"  Size:                     {self.thresholds['size']:.4f}")
 
         logger.info("\nFeature Weights:")
-        logger.info(f"  Distance:   {self.config.weight_distance:.2f}")
-        logger.info(f"  Appearance: {self.config.weight_appearance:.2f}")
-        logger.info(f"  Size:       {self.config.weight_size:.2f}")
+        logger.info(f"  Appearance:               {self.config.weight_appearance:.2f}")
+        logger.info(f"  Euclidean Distance:       {self.config.weight_euclidean_distance:.2f}")
+        logger.info(f"  Kalman Distance:          {self.config.weight_kalman_distance:.2f}")
+        logger.info(f"  Size:                     {self.config.weight_size:.2f}")
         logger.info("=" * 60)
 
     def track(self):
@@ -852,6 +853,7 @@ class IcebergTracker:
 
         return frame_results
 
+
     def _compute_similarity(self, track, detection, features_a, features_b):
         """
         Compute multi-feature similarity score with Kalman-predicted distance.
@@ -872,21 +874,8 @@ class IcebergTracker:
         """
         # Get last known position (conservative fallback)
         last_iceberg = {'bbox': track.last_bbox}
-
         # Current detection
         detection_iceberg = {'bbox': detection['bbox']}
-
-        # Compute distance to last known position
-        distance_last = get_distance(last_iceberg, detection_iceberg)
-
-        # Get Kalman predicted position (motion-aware)
-        predicted_bbox = track.predicted_bbox
-        predicted_iceberg = {'bbox': predicted_bbox}
-        # Compute distance to Kalman predicted position
-        distance_kalman = get_distance(predicted_iceberg, detection_iceberg)
-        # Weighted blend: favor Kalman but be conservative
-        kalman_weight = self.config.kalman_distance_weight
-        distance = (kalman_weight * distance_kalman + (1 - kalman_weight) * distance_last)
 
         # Size similarity (medium cost)
         size_similarity = get_size_similarity(last_iceberg, detection_iceberg)
@@ -896,9 +885,21 @@ class IcebergTracker:
             appearance_similarity = get_appearance_similarity(features_a, features_b, "cpu")
 
             if appearance_similarity >= self.thresholds['appearance'] * (1 - self.config.threshold_tolerance):
+                # Compute distance to last known position
+                distance_eucl = get_distance(last_iceberg, detection_iceberg)
+                # Get Kalman predicted position (motion-aware)
+                predicted_bbox = track.predicted_bbox
+                predicted_iceberg = {'bbox': predicted_bbox}
+                # Compute distance to Kalman predicted position
+                distance_kalman = get_distance(predicted_iceberg, detection_iceberg)
+
                 # Normalize distance to [0, 1] (1 = close, 0 = far)
-                distance_norm = 1 - min_max_normalize(
-                    distance, 0, self.thresholds['distance']
+                kalman_distance_norm = 1 - min_max_normalize(
+                    distance_kalman, 0, self.thresholds['distance']
+                )
+
+                eucl_distance_norm = 1 - min_max_normalize(
+                    distance_eucl, 0, self.thresholds['distance']
                 )
 
                 size_similarity = min_max_normalize(
@@ -912,10 +913,12 @@ class IcebergTracker:
                 # Compute weighted score with configured weights
                 weighted_score = get_score(
                     appearance_similarity,
-                    distance_norm,
+                    eucl_distance_norm,
+                    kalman_distance_norm,
                     size_similarity,
                     self.config.weight_appearance,
-                    self.config.weight_distance,
+                    self.config.weight_euclidean_distance,
+                    self.config.weight_kalman_distance,
                     self.config.weight_size
                 )
                 return weighted_score
