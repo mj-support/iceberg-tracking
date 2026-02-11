@@ -235,10 +235,6 @@ class Visualizer:
     def render_video(self):
         """
         Create an MP4 video from annotated images.
-
-        Compiles the annotated images (created by annotate_icebergs) into a
-        single video file with the specified frame rate. This is useful for
-        creating timelapse visualizations or presentation materials.
         """
         logger.info(f"Starting video rendering at {self.config.fps} fps...")
 
@@ -271,26 +267,73 @@ class Visualizer:
             if first_image is None:
                 raise FileNotFoundError(f"Could not read first image: {first_image_path}")
 
-            height, width, _ = first_image.shape
+            height, width = first_image.shape[:2]  # Remove the underscore for channels
             logger.info(f"Video dimensions: {width}x{height}")
             logger.info(f"Number of frames: {len(images)}")
 
-            # Initialize video writer with MP4 codec
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            video_writer = cv2.VideoWriter(video_path, fourcc, self.config.fps, (width, height))
+            # Try different codecs in order of preference
+            codecs = [
+                ('avc1', '.mp4'),  # H.264 - most compatible
+                ('mp4v', '.mp4'),  # MPEG-4
+                ('XVID', '.avi'),  # Xvid fallback
+            ]
+
+            video_writer = None
+            for codec, ext in codecs:
+                try:
+                    fourcc = cv2.VideoWriter_fourcc(*codec)
+                    test_path = video_path.replace('.mp4', ext)
+                    video_writer = cv2.VideoWriter(test_path, fourcc, self.config.fps, (width, height))
+
+                    # Test if writer was created successfully
+                    if video_writer.isOpened():
+                        video_path = test_path
+                        logger.info(f"Using codec: {codec}")
+                        break
+                    else:
+                        video_writer.release()
+                        video_writer = None
+                except Exception as e:
+                    logger.warning(f"Codec {codec} failed: {e}")
+                    continue
+
+            if video_writer is None:
+                raise RuntimeError("Failed to initialize video writer with any codec")
 
             # Write each frame to the video with progress tracking
             logger.info("Writing frames to video...")
+            failed_frames = 0
+
             for frame_name in tqdm(images, desc="Writing video", unit="frame"):
                 image_path = os.path.join(image_dir, frame_name)
                 img = cv2.imread(image_path)
-                if img is not None:
-                    video_writer.write(img)
-                else:
+
+                if img is None:
                     logger.warning(f"Could not read frame: {frame_name}")
+                    failed_frames += 1
+                    continue
+
+                # Ensure frame has correct dimensions
+                if img.shape[:2] != (height, width):
+                    logger.warning(f"Frame {frame_name} has wrong dimensions {img.shape[:2]}, resizing...")
+                    img = cv2.resize(img, (width, height))
+
+                # Ensure frame is in correct format (uint8, 3 channels)
+                if img.dtype != np.uint8:
+                    img = img.astype(np.uint8)
+
+                if len(img.shape) == 2:  # Grayscale
+                    img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+
+                # Write frame
+                video_writer.write(img)
 
             # Clean up and report completion
             video_writer.release()
+
+            if failed_frames > 0:
+                logger.warning(f"Failed to write {failed_frames} frames")
+
             logger.info("Video rendering complete.")
             logger.info(f"Video saved to: {video_path}")
 
