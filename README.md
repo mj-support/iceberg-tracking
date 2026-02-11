@@ -15,15 +15,6 @@ The system combines:
 - **Kalman filtering** for motion prediction and trajectory smoothing
 - **Hybrid tracking algorithm** combining appearance, motion, and spatial features
 
-### Key Features
-- Detection of icebergs in challenging conditions (variable lighting, weather, dense fields)
-- Multi-object tracking with ID consistency across extended time-lapse sequences
-- Handles 2,000-3,000 icebergs per frame in dense calving events
-- Achieves ~60% HOTA tracking performance
-- Production-ready system with built-in visualization and segmentation features
-- Flexible framework applicable to various glacier monitoring scenarios
-- Get started quickly with pretrained iceberg detection and embedding models or train from scratch using your own data
-
 ---
 <div align="center">
     <img src="examples/hill_2min_2023-08_tracking_0-9.gif" alt="hill" width="375"/>
