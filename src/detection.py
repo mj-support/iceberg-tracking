@@ -128,7 +128,7 @@ class IcebergDetectionConfig:
         filter_masked_regions (bool): Filter detections in masked areas (e.g., land)
         edge_tolerance (int): Minimum distance from image edge (pixels)
         mask_ratio_threshold (float): Maximum fraction of detection that can be masked
-        min_iceberg_size (float): Minimum bounding box area (pixels²)
+        min_iceberg_size (int): Minimum bounding box area (pixels)
 
         # Training Checkpoints
         save_checkpoints (bool): Save model weights after each epoch
@@ -181,7 +181,7 @@ class IcebergDetectionConfig:
     edge_tolerance: int = 0
     mask_ratio_threshold: float = 0.1
     filter_masked_regions: bool = True
-    min_iceberg_size: float = 0.0
+    min_iceberg_size: int = 100
 
     # Training checkpoints
     save_checkpoints: bool = False
